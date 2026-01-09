@@ -1,0 +1,72 @@
+subject_name: 재료과학개론II
+subject_characteristics: |-
+  - 과목 목표(교과목표/수업개요)
+    - Materials science and engineering의 기본 원리를 이해(구조–성질 상관관계 이해, 성질을 목표로 구조를 설계/공정으로 구현).
+    - 신입생 수준의 미적분·화학·물리(실험 포함) 이수자를 대상으로 재료의 성질 및 공정을 대학 수준에서 학습.
+
+  - 선수지식/난이도
+    - 선수학습: Freshmen calculus, chemistry, and physics course with experiments.
+    - 난이도: 제공되지 않음(단, 공학 기초과목 이수 전제 및 재료별 성질/공정/응용을 폭넓게 다룸).
+
+  - 핵심 토픽(주차별 계획 기반, 실제 용어 반영)
+    - Metal Alloys: 11. Applications and Processing of Metal Alloys Part 1~3 (1–2주)
+    - Ceramics: 12. Structures & Properties of Ceramics (3주), 13. Applications and Processing of Ceramics (4주)
+    - Polymers: 14. Polymer Structures (5주), 15. Characteristics, Applications & Processing of Polymers (6주)
+    - Composite Materials: 16. Properties and applications of Composites (7주)
+    - Midterm (8주)
+    - Corrosion and Degradation of Materials: 17장 (9주)
+    - Electrical Properties: 18장 (10주)
+    - Thermal & Magnetic Properties: 19장, 20장 (11주)
+    - Magnetic & Optical Properties: 20장, 21장 (12주)
+    - Optical Properties/응용: Application of Laser Processing (13주)
+    - Economic, Environmental, and Societal Issues: 22장 (14주)
+    - Final (15주)
+
+  - 수업 운영 특성/학습방법
+    - 강의식 70% + 문제중심학습 30%.
+    - 2025-2 「AI 결합 교과목」: AI 조교 기반 수준별 homework/quiz 포함 운영.
+    - 자료: Lecture notes( SmartLEAD 제공 ), 주교재 Callister 10e(영문) 및 한글 번역본.
+    - 강좌 언어: E(영문).
+
+  - 평가 비중(명시된 항목만)
+    - 출석 10%, 과제 30%, 중간 30%, 기말 30%, 기타 0%.
+    - 규정: 시험 미응시자는 Fail. Homework는 스스로 수행.
+
+  - 제외/비포함 범위(명시된 것만)
+    - 제공되지 않음(주차별 범위는 11–22장 및 Laser Processing 응용 포함으로만 확인 가능).
+question_profile: |-
+  - 출제 범위/단원 매핑(주차 목표 용어 반영)
+    - Metal Alloys(Ch.11), Ceramics(Ch.12–13), Polymers(Ch.14–15), Composites(Ch.16), Corrosion(Ch.17), Electrical(Ch.18), Thermal(Ch.19), Magnetic(Ch.20), Optical(Ch.21 + Laser Processing 응용), Economic/Environmental/Societal Issues(Ch.22).
+    - Midterm: 1–7주 중심(Ch.11–16). Final: 9–14주 중심(Ch.17–22, Laser Processing). (세부 누적/비누적 여부는 제공되지 않음)
+
+  - 문제 유형(권장 구성)
+    - 개념 이해형: 구조–성질(Structure–Property) 연결, 용어 정의/비교(예: ceramics vs polymers의 결합/구조 차이가 성질에 미치는 영향).
+    - 적용/해석형: 공정·응용 시나리오(Ch.11, 13, 15, 16)에서 재료 선택 근거 제시.
+    - 현상/메커니즘 설명형: corrosion/degradation 메커니즘(Ch.17), 전기·열·자기·광학 성질(Ch.18–21)의 원인 설명.
+    - 정량/계산형: 제공되지 않음(미적분/물리/화학 선수과목은 명시되어 있으나 계산문항 비중은 강의계획서에 없음).
+    - AI 결합 운영 반영: 수준별 homework/quiz용 짧은 문항(핵심 개념 체크) + 시험용 종합 문항(단원 간 연결) 병행 권장.
+
+  - 난이도 배분(추정 금지 원칙)
+    - 제공되지 않음(다만 문제중심학습 30%를 반영하여 ‘단순 암기’보다 적용/판단 문항을 포함하도록 설계 권장).
+
+  - 권장 사항(출제/채점)
+    - 강의 목표에 맞춰 ‘구조–성질 상관관계’와 ‘공정/응용에서의 재료 설계’가 답의 핵심이 되도록 문항 설계.
+    - 주차 목표 키워드를 그대로 사용(예: “Corrosion and Degradation of Materials”, “Electrical Properties”, “Thermal Properties”, “Magnetic Properties”, “Optical Properties”, “Application of Laser Processing”).
+    - SmartLEAD 제공 lecture notes/주교재( Callister )의 표준 용어·정의를 기준으로 정답 근거를 명시.
+    - 과제는 ‘스스로 수행’ 규정이 있으므로, homework/quiz는 유사문항 반복이 아닌 변형 데이터/상황 제시로 재사용 답안 방지.
+
+  - 금지/주의 사항
+    - 강의계획서에 없는 범위(예: 실험/실습 데이터 기반 문항, 팀프로젝트 산출물 기반 문항) 출제는 지양(실험/실습/팀기반 비중 0%).
+    - “시험 미응시 Fail” 규정과 충돌하는 대체평가형 문항 설계(시험 대체 과제 등)는 지양.
+    - 정답 근거가 교재/노트에 명확히 없는 최신 이슈·시사(Ch.22와 무관한 외부 기사 기반)는 지양.
+
+  - 정답 유일성/오답(선지) 설계 원칙
+    - 유일 정답 원칙: 정의/관계식/메커니즘이 교재적으로 단일하게 귀결되는 문장으로 선택지를 구성.
+    - 오답은 ‘부분적으로 맞지만 핵심 인과가 틀린’ 형태로 설계(예: 구조 용어는 맞지만 성질 방향성이 반대, 공정명은 맞지만 적용 재료군이 불일치).
+    - 단원 간 혼동을 활용한 오답(예: electrical vs thermal 캐리어/전달 메커니즘, magnetic vs optical 응답 변수 혼동, ceramics vs polymers bonding/structure 혼동).
+    - 계산형 문항을 낼 경우(여부 제공되지 않음): 단위/상수/기호 정의를 문제에 포함해 모호성 제거.
+
+  - 해설(풀이) 톤/형식
+    - 간결한 공학적 서술: (1) 핵심 개념 1–2문장 → (2) 구조–성질 연결 한 줄 → (3) 공정/응용 결론.
+    - 오답 해설은 “왜 그럴듯하지만 틀렸는지(혼동 포인트)”를 한 문장으로 명시.
+    - 영문 강좌(E) 특성상 핵심 용어는 영문(교재 표기) 병기 권장(예: corrosion, degradation, electrical/thermal/magnetic/optical properties).

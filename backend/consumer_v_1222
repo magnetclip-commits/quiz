@@ -1,0 +1,64 @@
+# consumer.py (수정된 부분)
+import redis
+import json
+from config import REDIS_CONFIG
+from task import trigger_download_tasks 
+from datetime import datetime
+
+
+redis_client = redis.Redis(**REDIS_CONFIG)
+stream_name = "downloadV_queue"
+group_name = "download_group_v"
+consumer_name = f"consumer_v_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+try:
+    redis_client.xgroup_create(stream_name, group_name, id='0-0', mkstream=True)
+except redis.exceptions.ResponseError as e:
+    if "BUSYGROUP" in str(e):
+        print(f"Consumer 그룹 '{group_name}'은 이미 존재합니다.", flush=True)
+        pass
+    else:
+        print(f"Consumer 그룹 생성 실패: {e}", flush=True)
+        raise e
+
+print(f"'{consumer_name}' Consumer 시작, '{stream_name}' 스트림의 '{group_name}' 그룹 읽는 중...")
+
+while True:
+    try:
+        messages = redis_client.xreadgroup(group_name, consumer_name, {stream_name: '>'}, count=1, block=5000) # 5초 대기
+        if messages:
+            for stream, message_list in messages:
+                for msg_id, message_data in message_list:
+                    # message_data 디코딩 (기존과 동일)
+                    decoded_message_data = {
+                        k.decode('utf-8') if isinstance(k, bytes) else k:
+                        v.decode('utf-8') if isinstance(v, bytes) else v
+                        for k, v in message_data.items()
+                    }
+
+                    # file_ids JSON 파싱 및 리스트 확인 (기존과 동일, 약간 더 견고하게)
+                    if "file_ids" in decoded_message_data:
+                        try:
+                            loaded_ids = json.loads(decoded_message_data["file_ids"])
+                            if not isinstance(loaded_ids, list):
+                                decoded_message_data["file_ids"] = [loaded_ids] # 단일 항목이면 리스트로
+                            else:
+                                decoded_message_data["file_ids"] = loaded_ids
+                        except (json.JSONDecodeError, TypeError):
+                            # JSON 파싱 실패 시 또는 이미 리스트가 아닐 경우 대비
+                            if not isinstance(decoded_message_data["file_ids"], list):
+                                decoded_message_data["file_ids"] = [str(decoded_message_data["file_ids"])]
+
+                    print(f"[{datetime.now().isoformat()}] 메시지 수신 {msg_id}: {decoded_message_data.get('cls_id')}, {len(decoded_message_data.get('file_ids', []))}개 파일")
+
+                    result = trigger_download_tasks.delay(decoded_message_data) 
+
+                    print(f"[{datetime.now().isoformat()}] - 메시지 {msg_id}를 Celery 작업 {result.id} (trigger_download_tasks)에 할당")
+
+                    redis_client.xack(stream_name, group_name, msg_id)
+
+    except Exception as e:
+        print(f"Consumer 루프 오류: {e}")
+        # 필요시 오류 발생 시 잠시 대기
+        import time
+        time.sleep(5)

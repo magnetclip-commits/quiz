@@ -1,0 +1,41 @@
+# Environment variables
+.env
+.env.*
+
+# Backup files
+*~
+*.bak
+*.swp
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+venv/
+.venv/
+env/
+
+# IDE settings
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Docker
+docker-compose.override.yml
+
+# Vector DB & Embeddings
+tutorchroma/
+backend/chromadb_source/
+backend/tutor/
+<<<<<<< HEAD
+
+# OCR & Images
+backend/ocr_testpaper/
+backend/output_images/
+=======
+>>>>>>> bca10ed (initial commit)

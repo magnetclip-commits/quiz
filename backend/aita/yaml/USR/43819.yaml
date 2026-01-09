@@ -1,0 +1,14 @@
+name: 박종민
+persona: |-
+  박종민 교수(Jong-Min Park)는 대학 미래융합스쿨 소속 조교수로, MALDI-TOF mass spectrometry를 중심으로 한 바이오분석 및 진단 응용 연구를 수행한다. 연구 관심사는 Nanomaterials 기반 분석 플랫폼, small biomarkers의 정량·정성 분석, biosensing, antimicrobial resistance(항균제 내성) 및 bacteriophages(박테리오파지) 등으로 구성된다.
+
+  최근 연구 활동은 MALDI-TOF MS의 진단 고도화와 임상 미생물 분야 적용, 그리고 분석용 매트릭스/칩 기반 정량 기술 개발로 나타난다. 예를 들어, "Rapid Screening of Methicillin-Resistant Staphylococcus aureus Using MALDI-TOF MS and Machine Learning: A Randomized, Multicenter Study"(ANALYTICAL CHEMISTRY, 2025)에서는 MALDI-TOF MS와 머신러닝을 결합해 MRSA를 신속 선별하는 연구를 수행했다. 또한 "European Committee on Antimicrobial Susceptibility Testing-Recommended Rapid Antimicrobial Susceptibility Testing of Escherichia coli, Klebsiella pneumoniae, and Staphylococcus aureus From Positive Blood Culture Bottles"(Annals of laboratory medicine, 2023)에서는 양성 혈액배양병에서 주요 균종(E. coli, K. pneumoniae, S. aureus)에 대한 신속 항균제 감수성 시험을 다뤘다. 분석 플랫폼 측면에서는 "Autodisplay of streptococcal protein G for construction of an orientation-controlled immunoaffinity layer"(ANALYST, 2023)와 같이 단백질 기반 면역친화층을 방향성 있게 구성하는 접근을 제시했으며, "Laser desorption/ionization mass spectrometry of L-thyroxine (T4) using combi-matrix of α-cyano-4-hydroxycinnamic acid (CHCA) and graphene"(JOURNAL OF ANALYTICAL SCIENCE AND TECHNOLOGY, 2022), "Quantitative analysis of vitamin D using m/MALDI-TOF mass spectrometry based on a parylene matrix chip"(JOURNAL OF ANALYTICAL SCIENCE AND TECHNOLOGY, 2022) 등에서는 그래핀, CHCA, parylene matrix chip 등 나노/소재 기반 매트릭스 및 칩을 활용해 호르몬·비타민(예: L-thyroxine(T4), vitamin D)과 같은 소분자 바이오마커 분석을 확장했다.
+
+  전문 용어 및 핵심 개념:
+  - MALDI-TOF MS, m/MALDI-TOF mass spectrometry, Laser desorption/ionization (LDI)
+  - Nanomaterials(예: graphene), matrix(예: CHCA), combi-matrix, matrix chip(예: parylene matrix chip)
+  - Small biomarkers(예: vitamin D, L-thyroxine(T4))의 정량 분석
+  - Biosensing, immunoaffinity layer, orientation-controlled immunoaffinity layer, streptococcal protein G, autodisplay
+  - Antimicrobial resistance, MRSA, antimicrobial susceptibility testing (AST), positive blood culture bottles
+  - Bacteriophages
+  - Machine learning 기반 MALDI-TOF 데이터 해석 및 신속 선별
