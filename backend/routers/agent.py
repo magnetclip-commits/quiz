@@ -9,7 +9,7 @@ import pytz
 from datetime import datetime
 from typing import Optional
 from aita.session_log import process_chat_session
-from aita.quiz_create import quizmain
+from aita.quiz_create_v2 import quizmain
 from aita.scoring_team import RunScoringAgentTeam
 #from aita.imageProcessor import mainReceiptPreprocessor
 from ocr_testpaper.ocr_gpt import ocr_main
@@ -367,7 +367,8 @@ async def enroll_items_to_bank(request: Request):
                     q->>'item_answer'                     AS item_answer,
                     q->>'item_explain'                    AS item_explain,
                     COALESCE(q->>'item_type_cd','MC')     AS item_type_cd,
-                    COALESCE(q->>'item_diff_cd','E')      AS item_diff_cd
+                    COALESCE(q->>'item_diff_cd','E')      AS item_diff_cd,
+                    q->>'grading_note'                   AS grading_note
                 FROM aita_chatbot_session s
                 CROSS JOIN LATERAL jsonb_array_elements(s.chat_file_json->'quiz_data'->'questions') AS q
                 WHERE q->>'item_id' = $1
@@ -399,7 +400,8 @@ async def enroll_items_to_bank(request: Request):
                         item_type_cd  = $7,
                         item_diff_cd  = $8,
                         upd_user_id   = $9,
-                        upd_dt        = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul'
+                        upd_dt        = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul',
+                        grading_note  = $10
                     WHERE item_id = $1
                     RETURNING item_id;
                 """
@@ -413,7 +415,8 @@ async def enroll_items_to_bank(request: Request):
                     row["item_explain"],
                     row["item_type_cd"],
                     row["item_diff_cd"],
-                    ins_user_id
+                    ins_user_id,
+                    row["grading_note"]
                 )
                 return {
                     "status": "updated",
@@ -426,10 +429,10 @@ async def enroll_items_to_bank(request: Request):
                 insert_sql = """
                     INSERT INTO aita_quiz_item_mst
                         (item_id, course_id, item_content, item_choices, item_answer, item_explain,
-                         item_type_cd, item_diff_cd, ins_user_id, ins_dt, del_yn)
+                         item_type_cd, item_diff_cd, ins_user_id, ins_dt, del_yn, grading_note)
                     VALUES
                         ($1, $2, $3, $4, $5, $6,
-                         $7, $8, $9, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul'), 'N')
+                         $7, $8, $9, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul'), 'N', $10)
                     RETURNING item_id;
                 """
                 inserted_id = await conn.fetchval(
@@ -442,7 +445,8 @@ async def enroll_items_to_bank(request: Request):
                     row["item_explain"],
                     row["item_type_cd"],
                     row["item_diff_cd"],
-                    ins_user_id
+                    ins_user_id,
+                    row["grading_note"]
                 )
                 return {
                     "status": "inserted",
@@ -623,6 +627,7 @@ async def item_edit_bank(request: Request):
         item_answer: str = body.get("item_answer", "")
         item_explain: str = body.get("item_explain", "")
         item_diff_cd: str = body.get("item_diff_cd", "E")
+        grading_note: str = body.get("grading_note")
 
         # 유효성 검사
         if not item_id:
@@ -643,7 +648,8 @@ async def item_edit_bank(request: Request):
                     item_explain = $5,
                     item_diff_cd = $6,
                     upd_user_id = $7,
-                    upd_dt = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul'
+                    upd_dt = CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul',
+                    grading_note = $8
                 WHERE item_id = $1;
             """
 
@@ -651,11 +657,12 @@ async def item_edit_bank(request: Request):
                 update_query,
                 item_id,
                 item_content,
-                json.dumps(item_choices, ensure_ascii=False),
+                json.dumps(item_choices, ensure_ascii=False) if item_choices is not None else None,
                 item_answer,
                 item_explain,
                 item_diff_cd,
-                user_id
+                user_id,
+                grading_note
             )
 
         finally:
@@ -794,6 +801,7 @@ async def exam_detail(request: Request):
             ,qms.item_explain --해설
             ,qms.item_type_cd --유형
             ,qms.item_diff_cd --난이도
+            ,qms.grading_note --채점기준
         FROM aita_quiz_item_map qma
         INNER JOIN aita_quiz_item_mst qms ON qma.item_id = qms.item_id 
         WHERE qma.quiz_id = $1
@@ -820,7 +828,8 @@ async def exam_detail(request: Request):
                     "item_answer": row["item_answer"],
                     "item_explain": row["item_explain"],
                     "item_type_cd": row["item_type_cd"],
-                    "item_diff_cd": row["item_diff_cd"]
+                    "item_diff_cd": row["item_diff_cd"],
+                    "grading_note": row["grading_note"]
                 }
                 for row in rows
             ]
@@ -1038,12 +1047,12 @@ async def item_manual_bank(request: Request):
                         item_id, course_id, item_content, item_choices,
                         item_answer, item_explain, item_type_cd, item_diff_cd,
                         file_path, ins_user_id, ins_dt, upd_user_id,
-                        upd_dt, del_yn
+                        upd_dt, del_yn, grading_note
                     ) VALUES (
                         $1, $2, $3, $4,
                         $5, $6, $7, $8,
                         $9, $10, $11, NULL,
-                        NULL, 'N'
+                        NULL, 'N', $12
                     )
                 """
 
@@ -1059,7 +1068,8 @@ async def item_manual_bank(request: Request):
                     question.get("difficulty", "E"),            # $8 item_diff_cd
                     "",                                         # $9 file_path
                     ins_user_id,                                # $10 ins_user_id
-                    now_kst
+                    now_kst,                                    # $11 ins_dt
+                    question.get("grading_note")                # $12 grading_note
                 )
 
         finally:

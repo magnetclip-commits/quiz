@@ -30,6 +30,7 @@ COLUMNS = [
     "upd_user_id",
     "upd_dt",
     "del_yn",
+    "grading_note",
 ]
 
 
