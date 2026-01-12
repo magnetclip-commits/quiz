@@ -88,15 +88,11 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "message": "Service is truly alive"}
-
-@app.post("/")
-async def post_root():
-    return {"status": "ok", "message": "Service is alive"}
+    return {"status": "ok", "message": "Service is truly alive (HLTA_READY)"}
 
 @app.get("/")
 async def read_root():
-   return {"message": "Hello"}
+   return {"message": "Hello from HLTA backend"}
 
 
 app.include_router(users.router, prefix="/users", tags=["Users"])

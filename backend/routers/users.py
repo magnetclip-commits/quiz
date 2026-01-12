@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+import os
 from config import DATABASE_CONFIG
 from fastapi import Request, HTTPException
 import asyncpg
@@ -259,6 +260,17 @@ async def register_user(request: Request):
                     
                     if c_id:
                         await conn.execute(cls_query_corrected, c_id, c_course, c_nm, c_sec, user_id, c_yr, c_smt, c_grd)
+                        # [NEW] 강좌 등록 후 프로필 초기화 SP 호출
+                        try:
+                            await conn.execute("CALL sp_aita_profile_init($1, $2);", user_id, c_id)
+                            logger.info(f"Initialized profile for {user_id} in {c_id}")
+                        except Exception as sp_e:
+                            logger.error(f"SP execution failed for {c_id}: {sp_e}")
+                            # SP 실패가 전체 가입 실패로 이어지지 않게 하거나, 
+                            # 혹은 트랜잭션을 깨야 한다면 raise를 그대로 둡니다.
+                            # 여기서는 주요 데이터(User/Class) 저장이 우선이므로 로깅 후 진행하도록 설정할 수 있지만, 
+                            # 트랜잭션 내부이므로 raise 시 자동 롤백됩니다.
+                            raise sp_e 
 
             logger.info(f"User {user_id} and {len(classes)} classes registered/updated successfully.")
             return {"status": "success", "message": f"User {user_id} and {len(classes)} classes processed."}
@@ -268,4 +280,93 @@ async def register_user(request: Request):
     except Exception as e:
         logger.error(f"Register User Error: {e}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+
+# 유저 프로필 초기화 API
+@router.post("/profile/init")
+async def init_user_profile(request: Request):
+    body = await request.json()
+    user_id = body.get("user_id")
+    cls_id = body.get("cls_id")
+
+    if not user_id or not cls_id:
+        raise HTTPException(status_code=400, detail="user_id와 cls_id는 필수 항목입니다.")
+
+    logger.info(f"Profile initialization request for user_id={user_id}, cls_id={cls_id}")
+
+    try:
+        # PostgreSQL 비동기 연결
+        conn = await asyncpg.connect(**DATABASE_CONFIG)
+        try:
+            # 프로시저 호출: sp_aita_profile_init(user_id, cls_id)
+            # CALL 구문을 사용하여 프로시저를 실행합니다.
+            await conn.execute("CALL sp_aita_profile_init($1, $2);", user_id, cls_id)
+            
+            logger.info(f"Successfully initialized profile for user_id={user_id}")
+            return {
+                "status": "success",
+                "message": "사용자 프로필이 성공적으로 초기화되었습니다. (hlta)"
+            }
+        finally:
+            await conn.close()
+
+    except Exception as e:
+        logger.error(f"Profile Init Error (sp_aita_profile_init): {repr(e)}")
+        logger.error(f"Traceback:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Database error while calling sp_aita_profile_init: {repr(e)}")
+
+
+# YAML 프로필 경로 설정
+PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "aita", "yaml", "USR")
+
+# 프로필 YAML 조회 API
+@router.get("/profile/config/{user_id}")
+async def get_profile_config(user_id: str):
+    # 보안 검증: user_id가 영숫자/대시/밑줄인지 확인 (Directory Traversal 방지)
+    if not re.match(r"^[a-zA-Z0-9_\-]+$", user_id):
+        raise HTTPException(status_code=400, detail="Invalid user_id format")
+
+    file_path = os.path.join(PROFILE_DIR, f"{user_id}.yaml")
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Profile YAML not found")
+    
+    try:
+        # aita/yaml 가 gitignore 되어 있을 수 있으므로 직접 읽기
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return {"user_id": user_id, "yaml_content": content}
+    except Exception as e:
+        logger.error(f"Error reading profile YAML for {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error reading profile file")
+
+# 프로필 YAML 저장 API
+@router.post("/profile/config")
+async def save_profile_config(request: Request):
+    body = await request.json()
+    user_id = body.get("user_id")
+    yaml_content = body.get("yaml_content")
+
+    if not user_id or yaml_content is None:
+        raise HTTPException(status_code=400, detail="Missing user_id or yaml_content")
+
+    # 보안 검증
+    if not re.match(r"^[a-zA-Z0-9_\-]+$", user_id):
+        raise HTTPException(status_code=400, detail="Invalid user_id format")
+
+    file_path = os.path.join(PROFILE_DIR, f"{user_id}.yaml")
+    
+    # 디렉토리가 없으면 생성 (안전장치)
+    if not os.path.exists(PROFILE_DIR):
+        os.makedirs(PROFILE_DIR, exist_ok=True)
+    
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(yaml_content)
+        logger.info(f"Profile YAML for {user_id} updated successfully.")
+        return {"status": "success", "message": "Profile updated successfully"}
+    except Exception as e:
+        logger.error(f"Error saving profile YAML for {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error saving profile file")
+
     

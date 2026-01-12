@@ -34,8 +34,8 @@ def sync_lms(user_id, cls_id, year, semester, api_base_url):
 
     # 2. 다운로드 대상 조회
     print("\n[2단계] 미처리 파일(다운로드 대상) 조회 중...")
-    url_target = f"{api_base_url}/file/materilalist"
-    # materilalist API는 user_id 없이 cls_id, year, semester만 받음 (routers/file.py 참고)
+    url_target = f"{api_base_url}/file/materiallist"
+    # materiallist API는 user_id 없이 cls_id, year, semester만 받음 (routers/file.py 참고)
     payload_target = {
         "cls_id": cls_id,
         "year": year,

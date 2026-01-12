@@ -540,8 +540,8 @@ async def lmsnoticelist(request: Request):
         raise HTTPException(status_code=500, detail=f"Get LMS Notice list error: {str(e)}")
 
 #LMS 수업 자료 리스트 조회 API
-@router.post("/materilalist")
-async def materilalist(request: Request):
+@router.post("/materiallist")
+async def materiallist(request: Request):
     body = await request.json()
     cls_id = body.get("cls_id")
     year = body.get("year")
