@@ -28,6 +28,7 @@ x-backend-defaults: &backend-defaults
     - ./logs:/app/logs:rw
     - /data/storage:/data/storage:rw
     - /opt/hlta/tutorchroma:/tmp/tutorchroma
+    - /data/storage/edu/manualdownload:/app/tutor/download_files/manual_test:rw
     # - /opt/hlta/backend/chromadb_source:/app/chromadb_source  # 문제발생에 따른파일마운트시 필요 
 
 networks:

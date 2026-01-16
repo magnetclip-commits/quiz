@@ -88,52 +88,111 @@ async def sync_postgres(data, open_year: str, open_term: str):
         deleted = await conn.execute(delete_query, open_year, open_term, oracle_cls_ids)
         print(f"폐강/미존재 SMART 강좌 삭제 결과: {deleted}")
 
-        # 기존 SMART 데이터의 rag_yn, rag_upd_dt, ins_dt 보존을 위해 미리 조회
-        rag_rows = await conn.fetch(
+        # 기존 SMART 데이터의 rag_yn, rag_upd_dt, ins_dt, upd_dt 및 비교 대상 컬럼 조회
+        existing_rows = await conn.fetch(
             """
-            SELECT cls_id, rag_yn, rag_upd_dt, ins_dt
+            SELECT cls_id, course_id, cls_nm, cls_nm_en, cls_sec, user_id, cls_yr, cls_smt, cls_grd,
+                   rag_yn, rag_upd_dt, ins_dt, upd_dt
               FROM cls_mst
              WHERE upload_type = 'SMART'
                AND cls_id = ANY($1::text[])
             """,
             oracle_cls_ids,
         )
-        rag_map = {r["cls_id"]: (r["rag_yn"], r["rag_upd_dt"], r["ins_dt"]) for r in rag_rows}
+        
+        # 기존 데이터를 cls_id 기준으로 매핑
+        existing_map = {}
+        for r in existing_rows:
+            cls_id = r["cls_id"]
+            existing_map[cls_id] = {
+                "course_id": r["course_id"],
+                "cls_nm": r["cls_nm"],
+                "cls_nm_en": r["cls_nm_en"],
+                "cls_sec": r["cls_sec"],
+                "user_id": r["user_id"],
+                "cls_yr": r["cls_yr"],
+                "cls_smt": r["cls_smt"],
+                "cls_grd": r["cls_grd"],
+                "rag_yn": r["rag_yn"],
+                "rag_upd_dt": r["rag_upd_dt"],
+                "ins_dt": r["ins_dt"],
+                "upd_dt": r["upd_dt"],
+            }
 
-        # 기존 SMART 데이터 중 이번 배치에 포함된 것만 삭제 후 재삽입 (ON CONFLICT 미사용)
-        delete_existing_query = """
-            DELETE FROM cls_mst
-             WHERE upload_type = 'SMART'
-               AND cls_id IN (SELECT unnest($1::text[]))
-        """
-        await conn.execute(delete_existing_query, oracle_cls_ids)
-
-        # INSERT 시: 기존 rag_yn, rag_upd_dt, ins_dt 값이 있으면 유지, 없으면 기본값 사용
+        # 변경 감지 및 삽입할 데이터만 수집
         insert_query = """
             INSERT INTO cls_mst (cls_id, course_id, cls_nm, cls_nm_en, cls_sec, user_id, cls_yr, cls_smt, cls_grd, rag_yn, rag_upd_dt, ins_dt, upd_dt, upload_type)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         """
 
-        data_with_rag = []
+        data_to_insert = []  # 삽입할 데이터만 수집
+        cls_ids_to_delete = []  # 삭제할 cls_id 목록 (변경된 데이터만)
+        updated_count = 0
+        unchanged_count = 0
+        new_count = 0
+        
         for row in data:
             cls_id = row[0]
-            # 기존 데이터가 있으면 rag_yn, rag_upd_dt, ins_dt 모두 유지 (rag_yn='N'이어도 ins_dt는 유지)
-            # 기존 데이터가 없으면 기본값 사용 (rag_yn='N', rag_upd_dt=null, ins_dt=Oracle에서 가져온 값)
-            existing = rag_map.get(cls_id)
+            existing = existing_map.get(cls_id)
+            
             if existing:
-                rag_yn, rag_upd_dt, ins_dt = existing
-                # rag_yn이 'N'이어도 ins_dt는 기존 값 유지
+                # 기존 데이터가 있는 경우 - 변경 여부 확인
+                rag_yn, rag_upd_dt, ins_dt = existing["rag_yn"], existing["rag_upd_dt"], existing["ins_dt"]
+                
+                # 데이터 변경 여부 확인 (비교 대상: course_id, cls_nm, cls_nm_en, cls_sec, user_id, cls_yr, cls_smt, cls_grd)
+                is_changed = (
+                    str(existing["course_id"]) != str(row[1]) or
+                    str(existing["cls_nm"] or "") != str(row[2] or "") or
+                    str(existing["cls_nm_en"] or "") != str(row[3] or "") or
+                    str(existing["cls_sec"] or "") != str(row[4] or "") or
+                    str(existing["user_id"] or "") != str(row[5] or "") or
+                    str(existing["cls_yr"] or "") != str(row[6] or "") or
+                    str(existing["cls_smt"] or "") != str(row[7] or "") or
+                    str(existing["cls_grd"] or "") != str(row[8] or "")
+                )
+                
+                if is_changed:
+                    # 변경된 데이터만 삭제/재삽입 대상에 추가
+                    upd_dt = row[10]  # 변경되었으면 새 upd_dt 사용
+                    updated_count += 1
+                    cls_ids_to_delete.append(cls_id)
+                    new_row = (
+                        row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8],
+                        rag_yn, rag_upd_dt, ins_dt, upd_dt, row[11]
+                    )
+                    data_to_insert.append(new_row)
+                else:
+                    # 변경되지 않았으면 삭제/재삽입 건너뛰기
+                    unchanged_count += 1
             else:
+                # 새 데이터는 항상 삽입
                 rag_yn, rag_upd_dt, ins_dt = "N", None, row[9]  # 새 데이터는 Oracle의 ins_dt 사용
-            # 원본 row: [cls_id, subj_cd, cls_nm, cls_nm_en, cls_sec, user_id, cls_yr, cls_smt, cls_grd, ins_dt, upd_dt, upload_type]
-            new_row = (
-                row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8],
-                rag_yn, rag_upd_dt, ins_dt, row[10], row[11]
-            )
-            data_with_rag.append(new_row)
+                upd_dt = row[10]  # 새 데이터는 새 upd_dt 사용
+                new_count += 1
+                new_row = (
+                    row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8],
+                    rag_yn, rag_upd_dt, ins_dt, upd_dt, row[11]
+                )
+                data_to_insert.append(new_row)
+        
+        print(f"데이터 변경 감지: {updated_count}개 변경됨, {unchanged_count}개 변경 없음, {new_count}개 새 데이터")
 
-        await conn.executemany(insert_query, data_with_rag)
-        print(f"{len(data_with_rag)}개 데이터 삽입 완료!")
+        # 변경된 데이터만 삭제
+        if cls_ids_to_delete:
+            delete_existing_query = """
+                DELETE FROM cls_mst
+                 WHERE upload_type = 'SMART'
+                   AND cls_id = ANY($1::text[])
+            """
+            await conn.execute(delete_existing_query, cls_ids_to_delete)
+            print(f"{len(cls_ids_to_delete)}개 변경된 데이터 삭제 완료")
+
+        # 변경된 데이터와 새 데이터만 삽입
+        if data_to_insert:
+            await conn.executemany(insert_query, data_to_insert)
+            print(f"{len(data_to_insert)}개 데이터 삽입 완료!")
+        else:
+            print("삽입할 데이터가 없습니다.")
 
         await conn.close()
     except Exception as e:
