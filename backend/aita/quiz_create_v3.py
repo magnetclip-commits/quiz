@@ -3,6 +3,7 @@
 2026.01.06 question_profile 추가, OpenAIEmbeddings(model="text-embedding-3-large" 추가
 2026.01.07 yaml/ 이하 폴더명 수정(CLS, USR, SYS)
 quiz_create_v2 단답형, 서술형 open
+2026.01.21 quiz_create_v3 profile 사용여부(use_yn)에 따라 사용
 '''
 import os
 import sys
@@ -177,6 +178,64 @@ def load_cls_config(cls_id: str) -> dict:
         "system_prompt": cls_data.get("system_prompt")
     }
 
+async def get_profile_use_yn(profile_type: str, user_id: str | None = None, cls_id: str | None = None) -> str | None:
+    """
+    aita_profile_mst에서 프로필 사용여부(use_yn)를 조회한다.
+
+    요구사항:
+    - profile_type='USR' 이면 user_id 조건으로 조회
+    - profile_type='CLS' 이면 cls_id 조건으로 조회
+
+    반환값:
+    - 'Y' 또는 'N': 레코드가 있고 use_yn 값
+    - None: 레코드가 없음
+    - DB 오류 시 기존 동작을 깨지 않도록 기본값 'Y'를 반환한다.
+    """
+    profile_type = (profile_type or "").upper().strip()
+    if profile_type not in {"USR", "CLS"}:
+        return "Y"
+
+    conn = None
+    try:
+        conn = await asyncpg.connect(**DATABASE_CONFIG)
+        if profile_type == "USR":
+            if not user_id:
+                return "Y"
+            use_yn = await conn.fetchval(
+                """
+                SELECT use_yn
+                FROM aita_profile_mst
+                WHERE profile_type = 'USR'
+                  AND user_id = $1
+                """,
+                user_id,
+            )
+        else:  # CLS
+            if not cls_id:
+                return "Y"
+            use_yn = await conn.fetchval(
+                """
+                SELECT use_yn
+                FROM aita_profile_mst
+                WHERE profile_type = 'CLS'
+                  AND cls_id = $1
+                """,
+                cls_id,
+            )
+
+        # 레코드가 없으면 None 반환
+        if use_yn is None:
+            return None
+
+        use_yn = use_yn.strip().upper()
+        return "Y" if use_yn not in {"Y", "N"} else use_yn
+    except Exception as e:
+        print(f"Warning: aita_profile_mst.use_yn 조회 실패(profile_type={profile_type}, user_id={user_id}, cls_id={cls_id}): {e}")
+        return "Y"
+    finally:
+        if conn:
+            await conn.close()
+
 
 def load_default_system_prompt() -> str:
     """기본 시스템 프롬프트를 YAML에서 로드"""
@@ -195,16 +254,52 @@ def load_default_system_prompt() -> str:
 async def generate_exam(user_id: str, class_id: str, exam_config: dict):
     """시험지 생성 함수"""
     try:
-        # 사용자별 설정 로드
-        user_config = load_user_config(user_id)
-        persona = user_config['persona']
-        
-        # 클래스별 설정 로드
-        cls_config = load_cls_config(class_id)
-        subject_name = cls_config.get('subject_name') or exam_config.get('subject_name', '')
-        subject_characteristics = cls_config['subject_characteristics']
-        question_profile = cls_config.get('question_profile', '')
-        system_prompt_template = cls_config.get('system_prompt')
+        # 프로필(YAML) 사용여부 조회
+        usr_use_yn = await get_profile_use_yn("USR", user_id=user_id)
+        cls_use_yn = await get_profile_use_yn("CLS", cls_id=class_id)
+
+        # 사용자별 설정 로드 (use_yn='N'이면 YAML 미참조)
+        usr_yaml_path = YAML_DIR / "USR" / f"{user_id}.yaml"
+        if usr_use_yn == "Y":
+            usr_yaml_exists = usr_yaml_path.exists()
+            user_config = load_user_config(user_id)
+            persona = user_config["persona"]
+            if usr_yaml_exists:
+                print(f"Info: 사용자 프로필 YAML 파일을 참고합니다: {usr_yaml_path}")
+            else:
+                print(f"Info: 사용자 프로필 YAML 파일이 없어 기본값을 사용합니다 (use_yn=Y이지만 파일 없음): {usr_yaml_path}")
+        elif usr_use_yn == "N":
+            persona = DEFAULT_PERSONA
+            print(f"Info: 사용자 프로필 YAML 파일을 참고하지 않습니다 (use_yn=N): {usr_yaml_path}")
+        else:  # None (레코드 없음)
+            persona = DEFAULT_PERSONA
+            print(f"Info: 사용자 프로필 YAML 파일을 참고하지 않습니다 (DB에 레코드 없음): {usr_yaml_path}")
+
+        # 클래스별 설정 로드 (use_yn='N'이면 YAML 미참조)
+        cls_yaml_path = YAML_DIR / "CLS" / f"{class_id}.yaml"
+        if cls_use_yn == "Y":
+            cls_yaml_exists = cls_yaml_path.exists()
+            cls_config = load_cls_config(class_id)
+            subject_name = cls_config.get("subject_name") or exam_config.get("subject_name", "")
+            subject_characteristics = cls_config.get("subject_characteristics", "기본 교육과정 내용")
+            question_profile = cls_config.get("question_profile", "")
+            system_prompt_template = cls_config.get("system_prompt")
+            if cls_yaml_exists:
+                print(f"Info: 클래스 프로필 YAML 파일을 참고합니다: {cls_yaml_path}")
+            else:
+                print(f"Info: 클래스 프로필 YAML 파일이 없어 기본값을 사용합니다 (use_yn=Y이지만 파일 없음): {cls_yaml_path}")
+        elif cls_use_yn == "N":
+            subject_name = exam_config.get("subject_name", "")
+            subject_characteristics = "기본 교육과정 내용"
+            question_profile = ""
+            system_prompt_template = None
+            print(f"Info: 클래스 프로필 YAML 파일을 참고하지 않습니다 (use_yn=N): {cls_yaml_path}")
+        else:  # None (레코드 없음)
+            subject_name = exam_config.get("subject_name", "")
+            subject_characteristics = "기본 교육과정 내용"
+            question_profile = ""
+            system_prompt_template = None
+            print(f"Info: 클래스 프로필 YAML 파일을 참고하지 않습니다 (DB에 레코드 없음): {cls_yaml_path}")
         
         vectorstore = await get_vectorstore(class_id)
         # vectorstore = None  # 임시로 비활성화 mjo 
@@ -226,7 +321,7 @@ async def generate_exam(user_id: str, class_id: str, exam_config: dict):
                 context = f"{subject_characteristics}\n\n관련 교육 자료:\n{formatted_docs}"
                 print(f"Info: 관련 문서를 찾았습니다.")
             else:
-                print(f"Info: {class_id} 강의에서 '{custom_request}'와 관련된 문서를 찾을 수 없어 과목 특성 기반으로 시험지를 생성합니다.")
+                print(f"Info: {class_id} 강의에서 '{custom_request}'와 관련된 문서를 찾을 수 없어 문서를 참고하지 않고 시험지를 생성합니다.")
 
         llm = ChatOpenAI(
             model="o1",
@@ -240,8 +335,10 @@ async def generate_exam(user_id: str, class_id: str, exam_config: dict):
         # 시험 문제 출제 시스템 프롬프트 (yaml에서 가져오거나 기본값 사용)
         if system_prompt_template:
             system_template = textwrap.dedent(system_prompt_template).strip()
+            print(f"Info: 시스템 프롬프트를 클래스 프로필 YAML 파일에서 사용합니다: {cls_yaml_path}")
         else:
             system_template = load_default_system_prompt()
+            print(f"Info: 시스템 프롬프트를 기본 YAML 파일에서 사용합니다: {DEFAULT_SYSTEM_PROMPT_PATH}")
         
         # question_profile이 있으면 시스템 프롬프트에 추가
         if question_profile:
@@ -390,11 +487,13 @@ if __name__ == "__main__":
         #user_id="43819",  # 재료과학개론II 박종민 43819
         #user_id="35033",  #--'무역결제론' 35033 성시일
         #user_id="45932",
-        user_id="20999", #김은주교수
+        #user_id="20999", #김은주교수
+        user_id="12345",
         #cls_id="2024-20-903102-2-01",  # 강의 아이디 창의적코딩 
         #cls_id="2025-20-633004-1-01",  # 무역결제론 
         #cls_id="2025-20-513003-1-01",  # 재료과학개론II 
-        cls_id="2025-20-003039-2-06", #김은주교수 창의코딩-모두의웹
+        #cls_id="2025-20-003039-2-06", #김은주교수 창의코딩-모두의웹
+        cls_id="12345",
         session_id="123b4567-3807-4afe-bb5d-df78f7e07ef0",  # 세션 아이디
         chat_seq=0,  # 채팅 시퀀스 번호
         exam_config={
@@ -406,7 +505,7 @@ if __name__ == "__main__":
             #'course_id': "903102",  # 강의 ID 창의적코딩
             'course_id': "003039", #김은주교수 창의코딩-모두의웹
 
-            'custom_request': "무역결제론에 대한 5문제 내줘"
+            'custom_request': "문제 유형은 객관식이고 문제 개수는 5개이며 난이도는 중급인 문제를 생성하시오."
         }
     ))
     
