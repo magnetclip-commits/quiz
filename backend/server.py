@@ -114,6 +114,14 @@ app.include_router(file.router, prefix="/file", tags=["File"])
 # app.include_router(rag_ready.router, prefix="/api/rag", tags=["RAG"])
 
 
+# # 정적 앱 mount
+# app.mount(
+#     "/tutor",
+#     StaticFiles(directory="/var/www/tutor/html", html=True),
+#     name="tutor"
+# )
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
