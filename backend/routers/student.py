@@ -1,6 +1,7 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from config import DATABASE_CONFIG
 from fastapi import Request, HTTPException
+from utils.security import get_current_user_optional
 import asyncpg
 
 
@@ -66,9 +67,9 @@ async def enrollment_student(request: Request):
 
 # 수강학생 정보 조회 API
 @router.post("/enrolled/student/chatinfo")
-async def enrolled_student_info(request: Request):
+async def enrolled_student_info(request: Request, jwt_user_id: str = Depends(get_current_user_optional)):
     body = await request.json()
-    user_id = body.get("user_id")
+    user_id = jwt_user_id or body.get("user_id")
     cls_id = body.get("cls_id")
 
     if not user_id:
@@ -205,10 +206,10 @@ async def enrolled_student_learncount(request: Request):
     
 # 수강학생 예복습 횟수 정보 조회 학생버전 API
 @router.post("/enrolled/student/learncount/std")
-async def enrolled_student_learncount_std(request: Request):
+async def enrolled_student_learncount_std(request: Request, jwt_user_id: str = Depends(get_current_user_optional)):
     body = await request.json()
     cls_id = body.get("cls_id")
-    user_id = body.get("user_id")
+    user_id = jwt_user_id or body.get("user_id")
 
     if not cls_id:
         raise HTTPException(status_code=400, detail="cls_id is required")
@@ -265,9 +266,9 @@ async def enrolled_student_learncount_std(request: Request):
     
 # 수강학생 예복습 리스트 조회 API
 @router.post("/enrolled/student/learnlist")
-async def enrolled_student_learnlist(request: Request):
+async def enrolled_student_learnlist(request: Request, jwt_user_id: str = Depends(get_current_user_optional)):
     body = await request.json()
-    user_id = body.get("user_id")
+    user_id = jwt_user_id or body.get("user_id")
     cls_id = body.get("cls_id")
     session_type = body.get("session_type")
     week_num = body.get("week_num")

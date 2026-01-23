@@ -4,9 +4,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import jwt
 import os
-from routers import users, student, agent
-from routers import file
-# from routers import auth, chat, openbadge, users, board, learn, student, quiz, prompt
+from routers import users, student, agent, file, auth
 # from routers import ragtest
 # from routers import rag_ready
 from ocr_testpaper import imagePreprocessor, ocr_gpt
@@ -99,7 +97,7 @@ app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(student.router, prefix="/student", tags=["Student"])
 app.include_router(agent.router, prefix="/agent", tags=["Agent"])
 app.include_router(file.router, prefix="/file", tags=["File"])
-# app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
+app.include_router(auth.router, prefix="/auth", tags=["Auth"])
 # app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 # app.include_router(file.router, prefix="/api/file", tags=["File"])
 # app.include_router(users.router, prefix="/api/users", tags=["Users"])

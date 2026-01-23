@@ -1,9 +1,9 @@
 from fastapi import APIRouter
 import os
 from config import DATABASE_CONFIG
-from fastapi import Request, HTTPException
+from fastapi import Request, HTTPException, Depends, Query
 import asyncpg
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import re
 from collections import Counter
 # from konlpy.tag import Okt  # 한국어 형태소 분석을 위한 KoNLPy 사용
@@ -12,12 +12,246 @@ import time
 import traceback
 import logging
 from utils.aes_util import encrypt
+from utils.security import get_current_user_optional
+from pydantic import BaseModel
+from datetime import datetime
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-# 수강목록 API
+# ============================================================================
+# Pydantic Models for Profile API
+# ============================================================================
+
+class ProfileResponse(BaseModel):
+    user_id: str
+    profile_type: str
+    cls_id: Optional[str] = None
+    profile_body: str
+    use_yn: str
+    created_dt: Optional[datetime] = None
+    updated_dt: Optional[datetime] = None
+
+
+class ProfileHistoryResponse(BaseModel):
+    hist_id: int
+    user_id: str
+    profile_type: str
+    cls_id: Optional[str] = None
+    profile_body: str
+    use_yn: str
+    saved_dt: datetime
+
+
+class UseYnUpdateRequest(BaseModel):
+    use_yn: str  # 'Y' or 'N'
+
+
+# ============================================================================
+# Profile APIs
+# ============================================================================
+
+# 1. GET - 현재 교수 프롬프트 값 조회
+@router.get("/api/profile/current/{user_id}", response_model=Optional[ProfileResponse])
+async def get_current_profile(
+    user_id: str,
+    profile_type: str = Query("USR", description="Profile type (USR: 교수, CLS: 과목)"),
+    cls_id: Optional[str] = Query(None, description="Class ID (profile_type=CLS인 경우 필수)"),
+    jwt_user_id: str = Depends(get_current_user_optional)
+):
+    """
+    현재 설정되어 있는 교수/과목 프롬프트 값 조회
+    
+    - **user_id**: 사용자 ID (교수 ID)
+    - **profile_type**: USR(교수 프롬프트) 또는 CLS(과목 프롬프트)
+    - **cls_id**: 과목 프롬프트 조회 시 필수
+    """
+    try:
+        conn = await asyncpg.connect(**DATABASE_CONFIG)
+        
+        query = """
+            SELECT * 
+            FROM aita_profile_mst apm 
+            WHERE user_id = $1
+            AND profile_type = $2
+        """
+        
+        params = [user_id, profile_type]
+        
+        # CLS 타입인 경우 cls_id 추가 필터링
+        if profile_type == "CLS" and cls_id:
+            query += " AND cls_id = $3"
+            params.append(cls_id)
+        
+        row = await conn.fetchrow(query, *params)
+        await conn.close()
+        
+        if not row:
+            return None
+        
+        return dict(row)
+    
+    except Exception as e:
+        logger.error(f"Error fetching profile: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"데이터 조회 실패: {str(e)}")
+
+
+# 2. GET - 과거 교수 프롬프트 이력 조회
+@router.get("/api/profile/history/{user_id}", response_model=List[ProfileHistoryResponse])
+async def get_profile_history(
+    user_id: str,
+    profile_type: str = Query("USR", description="Profile type (USR: 교수, CLS: 과목)"),
+    cls_id: Optional[str] = Query(None, description="Class ID (profile_type=CLS인 경우 선택)"),
+    limit: int = Query(10, description="최대 조회 개수", ge=1, le=100),
+    jwt_user_id: str = Depends(get_current_user_optional)
+):
+    """
+    과거 교수/과목 프롬프트 변경 이력 조회 (최신순)
+    
+    - **user_id**: 사용자 ID (교수 ID)
+    - **profile_type**: USR(교수 프롬프트) 또는 CLS(과목 프롬프트)
+    - **cls_id**: 과목 프롬프트 조회 시 선택사항
+    - **limit**: 최대 조회 개수 (1-100, 기본값: 10)
+    """
+    try:
+        conn = await asyncpg.connect(**DATABASE_CONFIG)
+        
+        query = """
+            SELECT * 
+            FROM aita_profile_hist aph  
+            WHERE user_id = $1
+            AND profile_type = $2
+        """
+        
+        params = [user_id, profile_type]
+        param_idx = 3
+        
+        # CLS 타입인 경우 cls_id 추가 필터링
+        if profile_type == "CLS" and cls_id:
+            query += f" AND cls_id = ${param_idx}"
+            params.append(cls_id)
+            param_idx += 1
+        
+        query += f" ORDER BY hist_id DESC LIMIT ${param_idx}"
+        params.append(limit)
+        
+        rows = await conn.fetch(query, *params)
+        await conn.close()
+        
+        return [dict(row) for row in rows]
+    
+    except Exception as e:
+        logger.error(f"Error fetching profile history: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"이력 조회 실패: {str(e)}")
+
+
+# 3. PUT - 교수 프롬프트 사용여부 변경
+@router.put("/api/profile/professor/{user_id}/toggle-use")
+async def update_professor_profile_use(
+    user_id: str,
+    request: UseYnUpdateRequest,
+    jwt_user_id: str = Depends(get_current_user_optional)
+):
+    """
+    교수 프롬프트 사용여부 변경
+    
+    - **user_id**: 교수 ID
+    - **use_yn**: 'Y' (사용) 또는 'N' (미사용)
+    """
+    # use_yn 유효성 검증
+    if request.use_yn not in ['Y', 'N']:
+        raise HTTPException(status_code=400, detail="use_yn은 'Y' 또는 'N'이어야 합니다")
+    
+    try:
+        conn = await asyncpg.connect(**DATABASE_CONFIG)
+        
+        query = """
+            UPDATE aita_profile_mst
+            SET use_yn = $1, prof_mod_dt = NOW()
+            WHERE user_id = $2
+            AND profile_type = 'USR'
+            RETURNING *
+        """
+        
+        result = await conn.fetchrow(query, request.use_yn, user_id)
+        await conn.close()
+        
+        if not result:
+            raise HTTPException(
+                status_code=404,
+                detail="해당 사용자의 교수 프롬프트가 존재하지 않습니다"
+            )
+        
+        logger.info(f"Professor profile use_yn updated for user {user_id} to {request.use_yn}")
+        return {
+            "message": "교수 프롬프트 사용여부가 변경되었습니다",
+            "data": dict(result)
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating professor profile: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"업데이트 실패: {str(e)}")
+
+
+# 4. PUT - 과목 프롬프트 사용여부 변경
+@router.put("/api/profile/class/{user_id}/{cls_id}/toggle-use")
+async def update_class_profile_use(
+    user_id: str,
+    cls_id: str,
+    request: UseYnUpdateRequest,
+    jwt_user_id: str = Depends(get_current_user_optional)
+):
+    """
+    과목 프롬프트 사용여부 변경
+    
+    - **user_id**: 교수 ID
+    - **cls_id**: 강의 ID
+    - **use_yn**: 'Y' (사용) 또는 'N' (미사용)
+    """
+    # use_yn 유효성 검증
+    if request.use_yn not in ['Y', 'N']:
+        raise HTTPException(status_code=400, detail="use_yn은 'Y' 또는 'N'이어야 합니다")
+    
+    try:
+        conn = await asyncpg.connect(**DATABASE_CONFIG)
+        
+        query = """
+            UPDATE aita_profile_mst
+            SET use_yn = $1, prof_mod_dt = NOW()
+            WHERE user_id = $2
+            AND cls_id = $3
+            AND profile_type = 'CLS'
+            RETURNING *
+        """
+        
+        result = await conn.fetchrow(query, request.use_yn, user_id, cls_id)
+        await conn.close()
+        
+        if not result:
+            raise HTTPException(
+                status_code=404,
+                detail="해당 강의의 과목 프롬프트가 존재하지 않습니다"
+            )
+        
+        logger.info(f"Class profile use_yn updated for user {user_id}, class {cls_id} to {request.use_yn}")
+        return {
+            "message": "과목 프롬프트 사용여부가 변경되었습니다",
+            "data": dict(result)
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating class profile: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"업데이트 실패: {str(e)}")
+
+
+# ============================================================================
+# Existing APIs
+# ============================================================================
 @router.post("/classlist")
 async def classlist(request: Request):
     body = await request.json()

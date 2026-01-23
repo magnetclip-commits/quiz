@@ -1,0 +1,431 @@
+'''
+quiz_create_v4.py - Milvus 기반 RAG 버전
+2026.01.23 ChromaDB 대신 Milvus를 사용하도록 변경
+- retriever/retriever.py의 VectorDB 클래스 활용
+- cls_id로 필터링하여 관련 문서 검색
+'''
+import os
+import sys
+import json
+import asyncio
+import yaml
+import textwrap
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
+from fastapi import HTTPException
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.documents.base import Document
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict
+import asyncpg
+import random
+import string
+import socket
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from config import DATABASE_CONFIG
+
+# Milvus retriever import
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'retriever')))
+try:
+    from retriever import VectorDB as MilvusVectorDB
+    MILVUS_AVAILABLE = True
+    print("Info: Milvus retriever loaded successfully")
+except ImportError as e:
+    print(f"Warning: Milvus retriever not available: {e}")
+    MILVUS_AVAILABLE = False
+
+# DATABASE_CONFIG 호스트 보정
+if DATABASE_CONFIG.get("host") == "host.docker.internal":
+    try:
+        socket.gethostbyname("host.docker.internal")
+    except socket.gaierror:
+        print("Info: DATABASE_HOST 'host.docker.internal'을 찾을 수 없어 'localhost'로 대체합니다.")
+        DATABASE_CONFIG["host"] = "localhost"
+
+BASE_DIR = Path(__file__).resolve().parent
+YAML_DIR = BASE_DIR / "yaml"
+DEFAULT_SYSTEM_PROMPT_PATH = YAML_DIR / "SYS" / "default.yaml"
+DEFAULT_PERSONA = """당신은 전문적인 교육자이자 시험문제 출제자입니다.
+제공된 교육 자료를 바탕으로 학습 목표에 맞는 고품질의 시험 문제를 생성합니다."""
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+MILVUS_COLLECTION_NAME = os.getenv("MILVUS_COLLECTION_NAME", "hallym_dev9")
+
+# .env 파일 로드
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("python-dotenv가 설치되지 않았습니다.")
+
+
+class ExamQuestion(BaseModel):
+    item_content: str = Field(description="시험 문제")
+    item_type_cd: str = Field(description="문제 유형 코드 (MC: 객관식, BLK: 빈칸채우기, SA: 단답형, ESS: 서술형)")
+    item_choices: Optional[Dict[str, str]] = Field(description="객관식 문제의 보기 (객관식인 경우에만 필요)", default=None)
+    item_answer: str = Field(description="정답")
+    item_explain: str = Field(description="문제 해설")
+    item_diff_cd: str = Field(description="난이도 (H: 상, M: 중, E: 하)")
+    item_id: Optional[str] = Field(description="문제 고유 ID", default=None)
+
+
+class ExamOutput(BaseModel):
+    questions: List[ExamQuestion]
+
+    def to_dict(self):
+        return {
+            "questions": [question.model_dump() for question in self.questions]
+        }
+
+
+# Milvus Vectorstore 관련 함수들
+def get_milvus_vectordb():
+    """Milvus VectorDB 인스턴스 반환"""
+    if not MILVUS_AVAILABLE:
+        return None
+    try:
+        return MilvusVectorDB()
+    except Exception as e:
+        print(f"Milvus 초기화 실패: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def get_milvus_docs(vectordb: MilvusVectorDB, query: str, cls_id: str, top_k: int = 5) -> List[Document]:
+    """Milvus에서 관련 문서 검색"""
+    if vectordb is None:
+        return []
+
+    try:
+        # cls_id로 필터링
+        expr_str = f'cls_id == "{cls_id}"'
+
+        docs = vectordb.retriever(
+            search_query=query,
+            collection_name=MILVUS_COLLECTION_NAME,
+            expr_str=expr_str,
+            top_k=top_k,
+            dense_retriever_limit=25
+        )
+        return docs
+    except Exception as e:
+        print(f"Milvus 문서 검색 중 오류 발생: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+async def get_relevant_docs_milvus(query: str, cls_id: str, top_k: int = 5) -> List[Document]:
+    """비동기적으로 Milvus에서 관련 문서 검색"""
+    loop = asyncio.get_event_loop()
+    vectordb = await loop.run_in_executor(None, get_milvus_vectordb)
+    if vectordb is None:
+        return []
+    return await loop.run_in_executor(None, get_milvus_docs, vectordb, query, cls_id, top_k)
+
+
+def format_docs(docs: List[Document]) -> Optional[str]:
+    """문서 포맷팅"""
+    if not docs:
+        return None
+    return '\n\n'.join([d.page_content for d in docs])
+
+
+def load_yaml_file(path: Path) -> dict:
+    """일반 yaml 로더"""
+    try:
+        if not path.exists():
+            print(f"경고: YAML 파일을 찾을 수 없습니다: {path}")
+            return {}
+        with open(path, "r", encoding="utf-8") as file:
+            return yaml.safe_load(file) or {}
+    except Exception as e:
+        print(f"YAML 로드 중 오류 발생 ({path}): {str(e)}")
+        return {}
+
+
+def load_user_config(user_id: str) -> dict:
+    """사용자별 설정 정보를 YAML 파일에서 로드"""
+    yaml_path = YAML_DIR / "USR" / f"{user_id}.yaml"
+    user_data = load_yaml_file(yaml_path)
+    return {
+        "persona": user_data.get("persona", DEFAULT_PERSONA)
+    }
+
+
+def load_cls_config(cls_id: str) -> dict:
+    """클래스별 설정 정보를 YAML 파일에서 로드"""
+    yaml_path = YAML_DIR / "CLS" / f"{cls_id}.yaml"
+    cls_data = load_yaml_file(yaml_path)
+    return {
+        "subject_name": cls_data.get("subject_name", ""),
+        "subject_characteristics": cls_data.get("subject_characteristics", "기본 교육과정 내용"),
+        "question_profile": cls_data.get("question_profile", ""),
+        "system_prompt": cls_data.get("system_prompt")
+    }
+
+
+async def get_profile_use_yn(profile_type: str, user_id: str | None = None, cls_id: str | None = None) -> str | None:
+    """aita_profile_mst에서 프로필 사용여부(use_yn)를 조회"""
+    profile_type = (profile_type or "").upper().strip()
+    if profile_type not in {"USR", "CLS"}:
+        return "Y"
+
+    conn = None
+    try:
+        conn = await asyncpg.connect(**DATABASE_CONFIG)
+        if profile_type == "USR":
+            if not user_id:
+                return "Y"
+            use_yn = await conn.fetchval(
+                "SELECT use_yn FROM aita_profile_mst WHERE profile_type = 'USR' AND user_id = $1",
+                user_id,
+            )
+        else:
+            if not cls_id:
+                return "Y"
+            use_yn = await conn.fetchval(
+                "SELECT use_yn FROM aita_profile_mst WHERE profile_type = 'CLS' AND cls_id = $1",
+                cls_id,
+            )
+
+        if use_yn is None:
+            return None
+        use_yn = use_yn.strip().upper()
+        return "Y" if use_yn not in {"Y", "N"} else use_yn
+    except Exception as e:
+        print(f"Warning: aita_profile_mst.use_yn 조회 실패: {e}")
+        return "Y"
+    finally:
+        if conn:
+            await conn.close()
+
+
+def load_default_system_prompt() -> str:
+    """기본 시스템 프롬프트를 YAML에서 로드"""
+    prompt_data = load_yaml_file(DEFAULT_SYSTEM_PROMPT_PATH)
+    prompt = prompt_data.get("system_prompt_template")
+    if prompt:
+        return textwrap.dedent(prompt).strip()
+    raise ValueError(f"시스템 프롬프트를 로드할 수 없습니다: {DEFAULT_SYSTEM_PROMPT_PATH}")
+
+
+async def generate_exam(user_id: str, class_id: str, exam_config: dict):
+    """시험지 생성 함수 (Milvus RAG 사용)"""
+    try:
+        # 프로필 사용여부 조회
+        usr_use_yn = await get_profile_use_yn("USR", user_id=user_id)
+        cls_use_yn = await get_profile_use_yn("CLS", cls_id=class_id)
+
+        # 사용자별 설정 로드
+        usr_yaml_path = YAML_DIR / "USR" / f"{user_id}.yaml"
+        if usr_use_yn == "Y":
+            user_config = load_user_config(user_id)
+            persona = user_config["persona"]
+            print(f"Info: 사용자 프로필 YAML 참조: {usr_yaml_path}")
+        else:
+            persona = DEFAULT_PERSONA
+            print(f"Info: 사용자 프로필 YAML 미참조 (use_yn={usr_use_yn})")
+
+        # 클래스별 설정 로드
+        cls_yaml_path = YAML_DIR / "CLS" / f"{class_id}.yaml"
+        if cls_use_yn == "Y":
+            cls_config = load_cls_config(class_id)
+            subject_name = cls_config.get("subject_name") or exam_config.get("subject_name", "")
+            subject_characteristics = cls_config.get("subject_characteristics", "기본 교육과정 내용")
+            question_profile = cls_config.get("question_profile", "")
+            system_prompt_template = cls_config.get("system_prompt")
+            print(f"Info: 클래스 프로필 YAML 참조: {cls_yaml_path}")
+        else:
+            subject_name = exam_config.get("subject_name", "")
+            subject_characteristics = "기본 교육과정 내용"
+            question_profile = ""
+            system_prompt_template = None
+            print(f"Info: 클래스 프로필 YAML 미참조 (use_yn={cls_use_yn})")
+
+        context = subject_characteristics
+
+        # Milvus에서 관련 문서 검색
+        custom_request = exam_config.get('custom_request', '없음')
+
+        if MILVUS_AVAILABLE:
+            print(f"Info: Milvus에서 '{class_id}' 클래스의 관련 문서 검색 중...")
+            docs = await get_relevant_docs_milvus(custom_request, class_id, top_k=5)
+
+            if docs:
+                formatted_docs = format_docs(docs)
+                context = f"{subject_characteristics}\n\n관련 교육 자료:\n{formatted_docs}"
+                print(f"Info: Milvus에서 {len(docs)}개의 관련 문서를 찾았습니다.")
+            else:
+                print(f"Info: Milvus에서 '{class_id}' 클래스의 관련 문서를 찾지 못했습니다.")
+        else:
+            print("Warning: Milvus를 사용할 수 없어 문서 없이 시험지를 생성합니다.")
+
+        llm = ChatOpenAI(
+            model="o1",
+            api_key=OPENAI_API_KEY
+        )
+
+        output_parser = JsonOutputParser(pydantic_object=ExamOutput)
+        format_instructions = output_parser.get_format_instructions()
+
+        # 시스템 프롬프트
+        if system_prompt_template:
+            system_template = textwrap.dedent(system_prompt_template).strip()
+            print(f"Info: 클래스 프로필의 시스템 프롬프트 사용")
+        else:
+            system_template = load_default_system_prompt()
+            print(f"Info: 기본 시스템 프롬프트 사용")
+
+        if question_profile:
+            question_profile_text = textwrap.dedent(question_profile).strip()
+            system_template = f"{system_template}\n\n**이 과목의 출제 가이드라인:**\n{question_profile_text}"
+
+        human_template = "{subject_name} 과목 범위 내에서 퀴즈 문제를 만들어 주세요. "\
+            " 사용자의 요청사항에서 문제 유형과 개수를 파악하여 출제해주세요."\
+            " 문제에 대한 **해설도 함께 제공**해주세요. "\
+            " 한국어로 질문을 하면 반드시 대답도 **한국어로 제공**해주세요."\
+            " 문제지 출제 요청사항: {custom_request}"
+
+        prompt = ChatPromptTemplate(
+            messages=[
+                SystemMessagePromptTemplate.from_template(system_template),
+                HumanMessagePromptTemplate.from_template(human_template)
+            ]
+        )
+
+        chain = (
+            prompt
+            | llm
+            | JsonOutputParser(pydantic_object=ExamOutput)
+        )
+
+        # 필수 필드 검증
+        if 'subject_name' not in exam_config or exam_config['subject_name'] is None:
+            raise HTTPException(status_code=400, detail="필수 필드가 누락되었습니다: subject_name")
+
+        exam = await chain.ainvoke({
+            "persona": persona,
+            "context": context,
+            "subject_name": exam_config['subject_name'],
+            "custom_request": custom_request,
+            "format_instructions": format_instructions
+        })
+
+        if isinstance(exam, dict):
+            exam = ExamOutput(**exam)
+
+        return {"exam_data": exam}
+    except Exception as e:
+        print(f"시험지 생성 중 오류 발생: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error generating exam: {str(e)}")
+
+
+async def format_exam_for_printing(exam_data: ExamOutput):
+    """시험지 미리보기 용"""
+    formatted_exam = []
+    formatted_exam.append("=" * 50)
+    formatted_exam.append("=" * 50 + "\n")
+
+    for i, q in enumerate(exam_data.questions, 1):
+        formatted_exam.append(f"{i}. [{q.item_type_cd}] {q.item_content}")
+        if hasattr(q, 'item_choices') and q.item_choices:
+            for key, value in q.item_choices.items():
+                formatted_exam.append(f"{key}. {value}")
+
+        formatted_exam.append("")
+        formatted_exam.append(f"정답: {q.item_answer}")
+        formatted_exam.append(f"해설: {q.item_explain}")
+        formatted_exam.append(f"난이도: {q.item_diff_cd}")
+        formatted_exam.append("\n" + "-" * 40 + "\n")
+
+    return "\n".join(formatted_exam)
+
+
+def generate_item_id(course_id: str) -> str:
+    rand_str = ''.join(random.choices(string.ascii_uppercase, k=6))
+    return f"ITEM-{course_id}-{rand_str}"
+
+
+async def save_quiz_to_db(exam_data: ExamOutput, session_id: str, chat_seq: int, course_id: str):
+    """퀴즈 데이터를 aita_chatbot_session 테이블에 저장"""
+    conn = None
+    try:
+        conn = await asyncpg.connect(**DATABASE_CONFIG)
+
+        kst = timezone(timedelta(hours=9))
+        kst_time = datetime.now(kst)
+
+        questions_with_id = []
+        for question in exam_data.questions:
+            question_dict = question.model_dump()
+            question_dict["item_id"] = generate_item_id(course_id)
+            questions_with_id.append(question_dict)
+            question.item_id = question_dict["item_id"]
+
+        quiz_json = {
+            "quiz_data": {
+                "questions": questions_with_id
+            },
+            "generated_at": kst_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "total_questions": len(exam_data.questions),
+            "rag_source": "milvus"  # RAG 소스 표시
+        }
+
+        await conn.execute('''
+            UPDATE aita_chatbot_session
+            SET chat_file_json = $1, upd_dt = CURRENT_TIMESTAMP
+            WHERE session_id = $2 AND chat_seq = $3
+        ''', json.dumps(quiz_json, ensure_ascii=False), session_id, chat_seq)
+
+        return True
+    except Exception as e:
+        print(f"데이터베이스 저장 중 오류 발생: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error saving to database: {str(e)}")
+    finally:
+        if conn:
+            await conn.close()
+
+
+async def quizmain(user_id: str, cls_id: str, session_id: str, chat_seq: int, exam_config: dict):
+    try:
+        exam_result = await generate_exam(user_id, cls_id, exam_config)
+        exam_data = exam_result["exam_data"]
+
+        formatted_exam = await format_exam_for_printing(exam_data)
+
+        await save_quiz_to_db(exam_data, session_id, chat_seq, exam_config.get('course_id', cls_id))
+
+        return {
+            "formatted_exam": formatted_exam,
+            "exam_data": exam_data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating exam: {str(e)}")
+
+
+if __name__ == "__main__":
+    result = asyncio.run(quizmain(
+        user_id="12345",
+        cls_id="2024-20-806550-1-01",  # Milvus에 임베딩된 강의 ID
+        session_id="123b4567-3807-4afe-bb5d-df78f7e07ef0",
+        chat_seq=0,
+        exam_config={
+            'subject_name': "테스트과목",
+            'course_id': "806550",
+            'custom_request': "문제 유형은 객관식이고 문제 개수는 3개이며 난이도는 중급인 문제를 생성하시오."
+        }
+    ))
+
+    print("\n=== 시험지 (Milvus RAG) ===")
+    print(result["formatted_exam"])
+
+    print("\n=== JSON 출력 ===")
+    exam_data_dict = result["exam_data"].to_dict()
+    print(json.dumps(exam_data_dict, ensure_ascii=False, indent=2))

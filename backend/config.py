@@ -38,3 +38,6 @@ REDIS_CONFIG = {
     "password":os.getenv("REDIS_PASSWORD", "admin1234!"),
     "db":os.getenv("REDIS_DB", 0)
 }
+
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "my-super-secret-key-1234567890123456")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
