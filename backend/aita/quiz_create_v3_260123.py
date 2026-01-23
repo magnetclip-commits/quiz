@@ -640,14 +640,14 @@ if __name__ == "__main__":
             #'course_id': "903102",  # 강의 ID 창의적코딩
             'course_id': "003039", #김은주교수 창의코딩-모두의웹
 
-            'custom_request': "객관식60 문제 생성"
+            'custom_request': "객관식 상10 중20 하30 주관식 10문제 생성"
         }
     ))
     
-    print("\n=== 시험지 ===")
-    print(result["formatted_exam"])
+    # print("\n=== 시험지 ===")
+    # print(result["formatted_exam"])
     
-    print("\n=== JSON 출력 ===")
-    # exam_data를 JSON 형태로 출력
-    exam_data_dict = result["exam_data"].to_dict()
-    print(json.dumps(exam_data_dict, ensure_ascii=False, indent=2))
+    # print("\n=== JSON 출력 ===")
+    # # exam_data를 JSON 형태로 출력
+    # exam_data_dict = result["exam_data"].to_dict()
+    # print(json.dumps(exam_data_dict, ensure_ascii=False, indent=2))
