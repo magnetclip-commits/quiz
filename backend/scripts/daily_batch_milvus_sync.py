@@ -65,6 +65,7 @@ def construct_payload(file_record: dict):
         "tenant_id": TENANT_ID,
 	"user_id": final_user_id,
 	"cls_id": cls_id,
+	"file_id": file_id,
         "storage_url": storage_url,
         "metadata": {
         	"files": [

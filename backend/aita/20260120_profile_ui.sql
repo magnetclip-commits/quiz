@@ -23,7 +23,7 @@ AND profile_type = 'USR'
 --과목 프롬프트 사용여부 변경시 
 UPDATE aita_profile_mst
 SET use_yn = 'N' -- OR 'Y'
-WHERE user_id = '99999'
+WHERE user_id = '99999
 AND cls_id = '2026-10-99999-2-01'
 AND profile_type = 'CLS'
 ;
