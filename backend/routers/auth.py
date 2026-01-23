@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from config import DATABASE_CONFIG, DATABASE2_CONFIG, FRONTEND_URL
 from fastapi import Request, HTTPException
 import asyncpg
@@ -12,6 +12,7 @@ import bcrypt
 import re
 
 from utils.aes_util import decrypt, encrypt
+from utils.security import create_access_token, get_current_user_optional
 
 
 router = APIRouter()
@@ -20,6 +21,34 @@ BASE64_PATTERN = re.compile(r'^[A-Za-z0-9+/=]+$')
 @router.get("/check")
 async def check_api():
     return {"message": "OK"}
+
+@router.get("/verify")
+async def verify_token(user_id: str = Depends(get_current_user_optional)):
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or missing token")
+    return {"user_id": user_id, "status": "valid"}
+
+@router.post("/decrypt-password")
+async def decrypt_password(request: Request):
+    """
+    암호화된 비밀번호를 평문으로 복호화
+    """
+    body = await request.json()
+    encrypted_pw = body.get("encrypted_password")
+    
+    if not encrypted_pw:
+        raise HTTPException(status_code=400, detail="encrypted_password is required")
+    
+    try:
+        decrypted_pw = decrypt(encrypted_pw)
+        return {
+            "status": "success",
+            "encrypted_password": encrypted_pw,
+            "decrypted_password": decrypted_pw
+        }
+    except Exception as e:
+        logging.error(f"Decryption failed: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Decryption failed: {str(e)}")
 
 # 로그인 처리 API
 @router.post("/login")
@@ -86,10 +115,14 @@ async def login(request: Request):
                 else:
                     raise HTTPException(status_code=401, detail="Invalid password")
             if decrypted_pw == user_pw:
+                user_id = row["user_id"]
+                access_token = create_access_token(data={"user_id": user_id})
                 return {
-                        "user_id": row["user_id"],
+                        "user_id": user_id,
                         "user_div": row["user_div"],
-                        "user_nm": row["user_nm"]
+                        "user_nm": row["user_nm"],
+                        "access_token": access_token,
+                        "token_type": "bearer"
                 }
             else:
                 raise HTTPException(status_code=401, detail="login failure")

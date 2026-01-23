@@ -1,5 +1,4 @@
 # hlta-api, hlta-chroma
-# hlta-api, hlta-chroma
 x-common-vars: &common-vars
   TZ: Asia/Seoul
   OPENAI_API_KEY: ${OPENAI_API_KEY}
@@ -34,6 +33,9 @@ x-backend-defaults: &backend-defaults
 networks:
   hlta_network:
     name: hlta_network
+  docker_kaai-net:
+    external: true
+    name: docker_kaai-net    
 
 services:
   hlta-redis:
@@ -58,6 +60,9 @@ services:
       - "host.docker.internal:host-gateway"    
     # env_file:
     #   - .env
+    networks:
+      - hlta_network
+      - docker_kaai-net
     ports:
       - "8085:8085"
     command: ["/usr/bin/dumb-init", "--", "uvicorn", "server:app", "--reload", "--host", "0.0.0.0", "--port", "8085", "--log-config", "/app/logging.ini"]

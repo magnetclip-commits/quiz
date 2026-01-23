@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 import traceback
 from config import DATABASE_CONFIG
@@ -8,8 +8,10 @@ import hashlib
 import pytz
 from datetime import datetime
 from typing import Optional
+from utils.security import get_current_user_optional
 from aita.session_log import process_chat_session
-from aita.quiz_create_v2 import quizmain
+#from aita.quiz_create_v2 import quizmain
+from aita.quiz_create_v3 import quizmain
 from aita.scoring_team import RunScoringAgentTeam
 #from aita.imageProcessor import mainReceiptPreprocessor
 from ocr_testpaper.ocr_gpt import ocr_main
@@ -22,9 +24,10 @@ router = APIRouter()
 
 #사용자 질문 API
 @router.post("/session/log")
-async def session_log(request: Request):
+async def session_log(request: Request, jwt_user_id: str = Depends(get_current_user_optional)):
     try:
         body = await request.json()
+        user_id = jwt_user_id or body.get("user_id")
         
         # 필수 필드 검증
         required_fields = {
@@ -35,7 +38,11 @@ async def session_log(request: Request):
         }
         
         # 모든 필수 필드 존재 여부와 값 검증
+        if not user_id:
+             raise HTTPException(status_code=400, detail="사용자 ID은(는) 필수 입력값입니다")
+             
         for field, field_name in required_fields.items():
+            if field == "user_id": continue # 이미 체크함
             if field not in body or not body[field]:
                 raise HTTPException(
                     status_code=400,
@@ -43,7 +50,7 @@ async def session_log(request: Request):
                 )
         
         # 유저 요청 처리
-        result = await process_chat_session(body["user_id"], body["cls_id"], body["session_id"], body["question"])
+        result = await process_chat_session(user_id, body["cls_id"], body["session_id"], body["question"])
         
         return result
         
@@ -59,9 +66,10 @@ async def session_log(request: Request):
 
 #문항 생성 API
 @router.post("/quiz/create")
-async def quiz_create(request: Request):
+async def quiz_create(request: Request, jwt_user_id: str = Depends(get_current_user_optional)):
     try:
         body = await request.json()
+        user_id = jwt_user_id or body.get("user_id")
         
         # 필수 필드 검증
         required_fields = {
@@ -98,7 +106,7 @@ async def quiz_create(request: Request):
         }
 
         # 퀴즈 생성 실행
-        result = await quizmain(body["user_id"], body["cls_id"], body["session_id"], body["chat_seq"], exam_config)
+        result = await quizmain(user_id, body["cls_id"], body["session_id"], body["chat_seq"], exam_config)
         
         return result["exam_data"]
         
@@ -112,10 +120,11 @@ async def quiz_create(request: Request):
 
 #유저 요청 처리 API
 @router.post("/user/request/quiz")
-async def user_request_quiz(request: Request):
+async def user_request_quiz(request: Request, jwt_user_id: str = Depends(get_current_user_optional)):
     logger = logging.getLogger(__name__)
     try:
         body = await request.json()
+        user_id = jwt_user_id or body.get("user_id")
 
         # 1) 공통 필수값 검증
         required_fields = {
@@ -342,11 +351,11 @@ async def item_edit_llm(request: Request):
 
 #문제은행 문항 등록 API
 @router.post("/item/enrollment/bank")
-async def enroll_items_to_bank(request: Request):
+async def enroll_items_to_bank(request: Request, jwt_user_id: str = Depends(get_current_user_optional)):
     body = await request.json()
 
     item_id: Optional[str] = body.get("item_id")
-    ins_user_id: Optional[str] = body.get("user_id")
+    ins_user_id: Optional[str] = jwt_user_id or body.get("user_id")
 
     if not item_id:
         raise HTTPException(status_code=400, detail="item_id는 필수입니다.")
@@ -617,10 +626,10 @@ async def search_item_by_suffix(request: Request):
     
 # 문제은행 문항 수정 API
 @router.post("/item/edit/bank")
-async def item_edit_bank(request: Request):
+async def item_edit_bank(request: Request, jwt_user_id: str = Depends(get_current_user_optional)):
     try:
         body = await request.json()
-        user_id:str = body.get("user_id")
+        user_id:str = jwt_user_id or body.get("user_id")
         item_id: str = body.get("item_id")
         item_content: str = body.get("item_content", "")
         item_choices: str = body.get("item_choices")

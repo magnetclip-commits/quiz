@@ -8,26 +8,32 @@ import argparse
 import urllib3
 from datetime import datetime
 from pathlib import Path
-from dotenv import load_dotenv
 
 # Add backend directory to sys.path
 current_dir = Path(__file__).resolve().parent
 backend_dir = current_dir.parent
 sys.path.append(str(backend_dir))
 
-# Load .env file
-load_dotenv(dotenv_path=backend_dir / ".env")
-
 # Suppress InsecureRequestWarning for self-signed certificates (verify=False)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from config import DATABASE_CONFIG
 
-# Configuration from Environment Variables
-MILVUS_INGEST_URL = os.getenv("MILVUS_INGEST_URL", "https://kaai-jobapi:5680/jobs")
-TENANT_ID = os.getenv("MILVUS_TENANT_ID", "7c934d46-9c90-4327-bcc5-60d464131b06")
-CALLBACK_URL_BASE = os.getenv("MILVUS_CALLBACK_URL", "http://172.17.0.1:56789/callback")
-X_API_KEY = os.getenv("MILVUS_API_KEY", "541e23d279a27ecf50902a78c43bd9861175c0b0386a5ecb48c6b3cf0a092608")
+# Configuration from Environment Variables (set via docker-compose env_file)
+MILVUS_INGEST_URL = os.getenv("MILVUS_INGEST_URL")
+if not MILVUS_INGEST_URL:
+    raise ValueError("MILVUS_INGEST_URL environment variable is not set. Check docker-compose.yml env_file")
+TENANT_ID = os.getenv("MILVUS_TENANT_ID")
+if not TENANT_ID:
+    raise ValueError("MILVUS_TENANT_ID environment variable is not set in .env file")
+
+CALLBACK_URL_BASE = os.getenv("MILVUS_CALLBACK_URL")
+if not CALLBACK_URL_BASE:
+    raise ValueError("MILVUS_CALLBACK_URL environment variable is not set in .env file")
+
+X_API_KEY = os.getenv("MILVUS_API_KEY")
+if not X_API_KEY:
+    raise ValueError("MILVUS_API_KEY environment variable is not set in .env file")
 
 def construct_payload(file_record: dict):
     """Constructs the JSON payload for the Milvus Ingest API"""
@@ -48,21 +54,20 @@ def construct_payload(file_record: dict):
     content_type = "lecture_material" if file_type_cd == 'M' else "bulletin_board"
     
     # Fixed S3 prefix as requested by admin
-    S3_FIXED_PREFIX = "s3://c11ebc288e44a7952a69876b2c834ff44ac7b00f"
+    #S3_FIXED_PREFIX = "s3://c11ebc288e44a7952a69876b2c834ff44ac7b00f"
+    S3_FIXED_PREFIX = "aiant"
     full_file_name = f"{file_nm}.{file_ext}" if not file_nm.endswith(file_ext) else file_nm
-    storage_url = f"{S3_FIXED_PREFIX}/{full_file_name}"
+    storage_url = f"{S3_FIXED_PREFIX}"
     
     # Payload structured according to the JobManager requirement
     return {
         "command": "ingest",
         "tenant_id": TENANT_ID,
-        "input": {
-            "user_id": final_user_id,
-            "cls_id": cls_id,
-            "file_id": file_id,
-            "storage_url": storage_url,
-            "metadata": {
-                "files": [
+	"user_id": final_user_id,
+	"cls_id": cls_id,
+        "storage_url": storage_url,
+        "metadata": {
+        	"files": [
                     {
                         "filename": full_file_name,
                         "saved_pathname": file_path,
@@ -74,11 +79,10 @@ def construct_payload(file_record: dict):
                 "content_type": content_type,
                 "embedding_date": datetime.now().strftime("%Y-%m-%d")
             },
-            "config": {
+        "config": {
                 "chunk_size": 250,
                 "chunk_overlap": 50
-            }
-        },
+            },
         "callback": {
             "url": CALLBACK_URL_BASE,
             "id": file_id
