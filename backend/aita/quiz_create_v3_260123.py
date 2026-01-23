@@ -4,6 +4,8 @@
 2026.01.07 yaml/ 이하 폴더명 수정(CLS, USR, SYS)
 quiz_create_v2 단답형, 서술형 open
 2026.01.21 quiz_create_v3 profile 사용여부(use_yn)에 따라 사용
+2026.01.23 에이전트 2단계: (1) custom_request에서 문항 수·유형·난이도 구조화 추출
+         (2) 해당 계획을 프롬프트에 명시해 '정확히 N문항' 출제 유도 (정규식/프론트 변경 없음)
 '''
 import os
 import sys
@@ -99,6 +101,23 @@ class ExamOutput(BaseModel):
         return {
             "questions": [question.model_dump() for question in self.questions]
         }
+
+
+# 에이전트 1단계: 사용자 요청에서 출제 계획(문항 수·유형·난이도) 추출
+class QuestionTypeCount(BaseModel):
+    """유형별 문항 수. item_type_cd: MC(객관식), BLK(빈칸), SA(단답), ESS(서술), OX(O/X)"""
+    item_type_cd: str = Field(description="문제 유형 코드")
+    count: int = Field(description="해당 유형 문항 수", ge=1)
+
+
+class QuizPlan(BaseModel):
+    """퀴즈 출제 요청에서 추출한 구조화된 계획. 문항 수·유형·난이도를 명확히 함."""
+    requested_total: int = Field(description="총 출제할 문항 수 (정확히 이 개수만 생성)", ge=1, le=100)
+    breakdown: List[QuestionTypeCount] = Field(
+        description="유형별 문항 수. breakdown 내 count 합계는 requested_total과 일치해야 함."
+    )
+    difficulty: str = Field(description="난이도 H(상)/M(중)/E(하). 혼합이면 M", default="M")
+    other_notes: Optional[str] = Field(description="그 외 출제 시 반영할 참고사항", default=None)
 
 # Vectorstore 관련 함수들
 def get_chroma_vectorstore(cls_id: str):
@@ -237,6 +256,86 @@ async def get_profile_use_yn(profile_type: str, user_id: str | None = None, cls_
             await conn.close()
 
 
+# 계획 추출용 경량 LLM (빠른 JSON 응답)
+PLAN_EXTRACT_MODEL = os.getenv("QUIZ_PLAN_EXTRACT_MODEL", "gpt-4o-mini")
+
+
+def _format_quiz_plan_instruction(plan: QuizPlan) -> str:
+    """QuizPlan → LLM에 넘길 '문항 수·유형 필수 준수' 지시 문자열 생성."""
+    parts = [
+        f"**총 문항 수: 정확히 {plan.requested_total}문항만 출제**합니다. "
+        f"{plan.requested_total - 1}문항이나 {plan.requested_total + 1}문항을 내면 안 됩니다."
+    ]
+    type_names = {
+        "MC": "객관식(MC)",
+        "BLK": "빈칸채우기(BLK)",
+        "SA": "단답형(SA)",
+        "ESS": "서술형(ESS)",
+        "OX": "O/X(OX)",
+    }
+    for b in plan.breakdown:
+        name = type_names.get(b.item_type_cd.upper(), b.item_type_cd)
+        parts.append(f"- {name}: {b.count}문항")
+    parts.append(f"- 난이도: {plan.difficulty} (H/M/E)")
+    if plan.other_notes and plan.other_notes.strip():
+        parts.append(f"- 참고사항: {plan.other_notes.strip()}")
+    return "\n".join(parts)
+
+
+async def extract_quiz_plan(custom_request: str) -> Optional[QuizPlan]:
+    """
+    사용자 요청(custom_request)에서 문항 수·유형·난이도를 구조화해 추출.
+    에이전트 1단계: 이 계획을 바탕으로 2단계에서 '정확히 N문항' 출제 지시.
+    """
+    if not (custom_request or "").strip():
+        return None
+
+    plan_llm = ChatOpenAI(
+        model=PLAN_EXTRACT_MODEL,
+        api_key=OPENAI_API_KEY,
+        temperature=0,
+    )
+    plan_parser = JsonOutputParser(pydantic_object=QuizPlan)
+
+    plan_prompt = ChatPromptTemplate.from_messages([
+        ("system", """당신은 퀴즈 출제 요청을 분석하는 역할입니다.
+사용자 요청에서 **총 문항 수(requested_total)**, **유형별 문항 수(breakdown)**, **난이도(difficulty)**를 추출해 아래 형식의 JSON만 출력하세요.
+
+규칙:
+- requested_total: 사용자가 요청한 총 문제 개수. 명시 안 되면 5로 추정.
+- breakdown: 유형별 개수. item_type_cd는 MC/BLK/SA/ESS/OX 중 하나. breakdown의 count 합계 = requested_total.
+- "객관식 20문제" → requested_total=20, breakdown=[{{"item_type_cd":"MC","count":20}}]
+- "객관식 15, 빈칸 5" → requested_total=20, breakdown=[{{"item_type_cd":"MC","count":15}},{{"item_type_cd":"BLK","count":5}}]
+- 유형 미명시 시 객관식(MC)로 간주.
+- difficulty: H(상)/M(중)/E(하). 미명시 시 M.
+
+{format_instructions}"""),
+        ("human", "다음 출제 요청을 분석하세요.\n\n{custom_request}"),
+    ])
+
+    try:
+        chain = plan_prompt | plan_llm | plan_parser
+        out = await chain.ainvoke({
+            "custom_request": custom_request,
+            "format_instructions": plan_parser.get_format_instructions(),
+        })
+        plan = QuizPlan(**out) if isinstance(out, dict) else out
+
+        # breakdown 합계 보정: requested_total과 다르면 단일 유형(MC)으로 통일
+        total_from_breakdown = sum(b.count for b in plan.breakdown)
+        if total_from_breakdown != plan.requested_total or not plan.breakdown:
+            plan = QuizPlan(
+                requested_total=plan.requested_total,
+                breakdown=[QuestionTypeCount(item_type_cd="MC", count=plan.requested_total)],
+                difficulty=plan.difficulty,
+                other_notes=plan.other_notes,
+            )
+        return plan
+    except Exception as e:
+        print(f"Warning: extract_quiz_plan 실패 (custom_request 일부 사용): {e}")
+        return None
+
+
 def load_default_system_prompt() -> str:
     """기본 시스템 프롬프트를 YAML에서 로드"""
     prompt_data = load_yaml_file(DEFAULT_SYSTEM_PROMPT_PATH)
@@ -323,6 +422,18 @@ async def generate_exam(user_id: str, class_id: str, exam_config: dict):
             else:
                 print(f"Info: {class_id} 강의에서 '{custom_request}'와 관련된 문서를 찾을 수 없어 문서를 참고하지 않고 시험지를 생성합니다.")
 
+        custom_request = exam_config.get('custom_request', '없음')
+        # 에이전트 1단계: 요청에서 문항 수·유형·난이도 구조화 추출 → 2단계에서 '정확히 N문항' 지시
+        plan = await extract_quiz_plan(custom_request)
+        if plan:
+            quiz_plan_instruction = _format_quiz_plan_instruction(plan)
+            print(f"Info: 출제 계획 추출됨 — 총 {plan.requested_total}문항, 유형별: {[(b.item_type_cd, b.count) for b in plan.breakdown]}")
+        else:
+            quiz_plan_instruction = (
+                "문항 수·유형은 사용자 요청(아래 custom_request)에 명시된 대로 **정확히** 지키세요. "
+                "1문항이라도 많거나 적으면 안 됩니다."
+            )
+
         llm = ChatOpenAI(
             model="o1",
             api_key=OPENAI_API_KEY
@@ -345,11 +456,22 @@ async def generate_exam(user_id: str, class_id: str, exam_config: dict):
             question_profile_text = textwrap.dedent(question_profile).strip()
             system_template = f"{system_template}\n\n**이 과목의 출제 가이드라인:**\n{question_profile_text}"
 
-        human_template = "{subject_name} 과목 범위 내에서 퀴즈 문제를 만들어 주세요. "\
-            " 사용자의 요청사항에서 문제 유형과 개수를 파악하여 출제해주세요."\
-            " 문제에 대한 **해설도 함께 제공**해주세요. "\
-            " 한국어로 질문을 하면 반드시 대답도 **한국어로 제공**해주세요."\
-            " 문제지 출제 요청사항: {custom_request}"
+        # 문항 수 필수 준수 블록: 구조화된 계획으로 '정확히 N문항' 강제
+        system_template = (
+            f"{system_template}\n\n"
+            "**【문항 수 필수 준수】**\n"
+            "{quiz_plan_instruction}\n"
+            "위 개수·유형을 정확히 지키세요. 1문항이라도 많거나 적게 내면 안 됩니다."
+        )
+
+        human_template = (
+            "{subject_name} 과목 범위 내에서 퀴즈 문제를 만들어 주세요. "
+            "**반드시 아래 출제 계획에 따라 정확히 해당 문항 수만큼만** 출제해주세요. "
+            "문제에 대한 **해설도 함께 제공**해주세요. "
+            "한국어로 질문을 하면 반드시 대답도 **한국어로 제공**해주세요.\n\n"
+            "출제 계획:\n{quiz_plan_instruction}\n\n"
+            "사용자 요청 원문: {custom_request}"
+        )
 
         prompt = ChatPromptTemplate(
             messages=[
@@ -357,9 +479,6 @@ async def generate_exam(user_id: str, class_id: str, exam_config: dict):
                 HumanMessagePromptTemplate.from_template(human_template)
             ]
         )
-
-        # 추가 요청사항 처리
-        custom_request = exam_config.get('custom_request', '없음')
 
         chain = (
             prompt 
@@ -381,12 +500,26 @@ async def generate_exam(user_id: str, class_id: str, exam_config: dict):
             "context": context,
             "subject_name": exam_config['subject_name'],
             "custom_request": custom_request,
-            "format_instructions": format_instructions
+            "format_instructions": format_instructions,
+            "quiz_plan_instruction": quiz_plan_instruction,
         })
 
         # ExamOutput 객체로 변환
         if isinstance(exam, dict):
             exam = ExamOutput(**exam)
+
+        # 에이전트 2단계 이후 백엔드 가드레일:
+        # 계획(plan)이 있고 실제 생성 문항 수가 요청 개수보다 많으면
+        # 정규식이 아닌 리스트 슬라이스로 개수를 강제로 맞춘다.
+        if 'plan' in locals() and isinstance(plan, QuizPlan):
+            target_cnt = plan.requested_total
+            actual_cnt = len(exam.questions)
+            if actual_cnt > target_cnt:
+                print(
+                    f"Info: 생성 문항 수 초과 감지 — 요청 {target_cnt}문항, 실제 {actual_cnt}문항. "
+                    f"앞에서부터 {target_cnt}문항만 사용합니다."
+                )
+                exam.questions = exam.questions[:target_cnt]
 
         return {"exam_data": exam}
     except Exception as e:
@@ -505,7 +638,7 @@ if __name__ == "__main__":
             #'course_id': "903102",  # 강의 ID 창의적코딩
             'course_id': "003039", #김은주교수 창의코딩-모두의웹
 
-            'custom_request': "문제 유형은 객관식이고 문제 개수는 5개이며 난이도는 중급인 문제를 생성하시오."
+            'custom_request': "문제 유형은 객관식이고 문제 개수는 50개이며 난이도는 중급인 문제를 생성하시오."
         }
     ))
     
