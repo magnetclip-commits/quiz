@@ -4,6 +4,10 @@
 2026.01.07 yaml/ 이하 폴더명 수정(CLS, USR, SYS)
 quiz_create_v2 단답형, 서술형 open
 2026.01.21 quiz_create_v3 profile 사용여부(use_yn)에 따라 사용
+2026.01.23 출제 요청 처리 구조 개선
+        - custom_request에서 문항 수·유형·난이도 정보를 구조화하여 추출
+        - 추출된 출제 계획을 프롬프트에 명시해 문항 수·유형 정확도 개선
+        - 생성 결과 초과 시 백엔드 가드레일 적용
 '''
 import os
 import sys
@@ -99,6 +103,36 @@ class ExamOutput(BaseModel):
         return {
             "questions": [question.model_dump() for question in self.questions]
         }
+
+
+# 에이전트 1단계: 사용자 요청에서 출제 계획(문항 수·유형·난이도) 추출
+class QuestionTypeCount(BaseModel):
+    """
+    유형·난이도별 문항 수.
+    - item_type_cd: MC(객관식), BLK(빈칸), SA(단답), ESS(서술), OX(O/X)
+    - item_diff_cd: H(상)/M(중)/E(하). 비워두면 해당 유형 내 난이도 무관하게 합산.
+    """
+    item_type_cd: str = Field(description="문제 유형 코드")
+    item_diff_cd: Optional[str] = Field(
+        default=None,
+        description="해당 유형의 난이도 코드(H/M/E). 지정 안 하면 난이도 무관하게 계산."
+    )
+    count: int = Field(description="해당 유형·난이도 문항 수", ge=1)
+
+
+class QuizPlan(BaseModel):
+    """
+    퀴즈 출제 요청에서 추출한 구조화된 계획.
+    - requested_total: 총 문항 수
+    - breakdown: (유형, 난이도)별 문항 수
+    - difficulty: 전체 시험의 대표 난이도(혼합이면 M 등 요약값)
+    """
+    requested_total: int = Field(description="총 출제할 문항 수 (정확히 이 개수만 생성)", ge=1, le=100)
+    breakdown: List[QuestionTypeCount] = Field(
+        description="유형·난이도별 문항 수. 각 항목의 count 합계는 requested_total과 가급적 일치해야 함."
+    )
+    difficulty: str = Field(description="전체 시험 대표 난이도 H(상)/M(중)/E(하). 혼합이면 M", default="M")
+    other_notes: Optional[str] = Field(description="그 외 출제 시 반영할 참고사항", default=None)
 
 # Vectorstore 관련 함수들
 def get_chroma_vectorstore(cls_id: str):
@@ -237,6 +271,171 @@ async def get_profile_use_yn(profile_type: str, user_id: str | None = None, cls_
             await conn.close()
 
 
+# 계획 추출용 경량 LLM (빠른 JSON 응답)
+PLAN_EXTRACT_MODEL = os.getenv("QUIZ_PLAN_EXTRACT_MODEL", "gpt-4o-mini")
+
+
+def _format_quiz_plan_instruction(plan: QuizPlan) -> str:
+    """QuizPlan → LLM에 넘길 '문항 수·유형·난이도 필수 준수' 지시 문자열 생성."""
+    parts = [
+        f"**총 문항 수: 정확히 {plan.requested_total}문항만 출제**합니다. "
+        f"{plan.requested_total - 1}문항이나 {plan.requested_total + 1}문항을 내면 안 됩니다."
+    ]
+    type_names = {
+        "MC": "객관식(MC)",
+        "BLK": "빈칸채우기(BLK)",
+        "SA": "단답형(SA)",
+        "ESS": "서술형(ESS)",
+        "OX": "O/X(OX)",
+    }
+    for b in plan.breakdown:
+        name = type_names.get(b.item_type_cd.upper(), b.item_type_cd)
+        diff = (b.item_diff_cd or plan.difficulty or "M").upper()
+        parts.append(f"- {name} / 난이도 {diff}: {b.count}문항")
+    parts.append(f"- 전체 대표 난이도: {plan.difficulty} (H/M/E)")
+    if plan.other_notes and plan.other_notes.strip():
+        parts.append(f"- 참고사항: {plan.other_notes.strip()}")
+    return "\n".join(parts)
+
+
+async def extract_quiz_plan(custom_request: str) -> Optional[QuizPlan]:
+    """
+    사용자 요청(custom_request)에서 문항 수·유형·난이도를 구조화해 추출.
+    에이전트 1단계: 이 계획을 바탕으로 2단계에서 '정확히 N문항' 출제 지시.
+    """
+    if not (custom_request or "").strip():
+        return None
+
+    plan_llm = ChatOpenAI(
+        model=PLAN_EXTRACT_MODEL,
+        api_key=OPENAI_API_KEY,
+        temperature=0,
+    )
+    plan_parser = JsonOutputParser(pydantic_object=QuizPlan)
+
+    plan_prompt = ChatPromptTemplate.from_messages([
+        ("system", """당신은 퀴즈 출제 요청을 분석하는 역할입니다.
+사용자 요청에서 **총 문항 수(requested_total)**, **유형·난이도별 문항 수(breakdown)**, **전체 대표 난이도(difficulty)**를 추출해 아래 형식의 JSON만 출력하세요.
+
+규칙:
+- requested_total: 사용자가 요청한 총 문제 개수. 명시 안 되면 5로 추정.
+- breakdown: (유형, 난이도)별 개수.
+  - item_type_cd는 MC/BLK/SA/ESS/OX 중 하나.
+  - item_diff_cd는 H(상)/M(중)/E(하) 중 하나 또는 null.
+  - breakdown의 count 합계는 requested_total과 가급적 같아야 한다.
+- 예시:
+  - "객관식 20문제" →
+      requested_total=20,
+      breakdown=[{{"item_type_cd":"MC","item_diff_cd":null,"count":20}}]
+  - "객관식 상10 중10" →
+      requested_total=20,
+      breakdown=[
+        {{"item_type_cd":"MC","item_diff_cd":"H","count":10}},
+        {{"item_type_cd":"MC","item_diff_cd":"M","count":10}}
+      ]
+  - "객관식 상50,중5, 주관식 30문제 생성" →
+      requested_total=85,
+      breakdown=[
+        {{"item_type_cd":"MC","item_diff_cd":"H","count":50}},
+        {{"item_type_cd":"MC","item_diff_cd":"M","count":5}},
+        {{"item_type_cd":"SA","item_diff_cd":"M","count":30}}
+      ]
+- 유형만 있고 난이도가 없으면 item_diff_cd는 null로 두고, 전체 대표 난이도(difficulty)를 참고해 해석한다.
+- difficulty: 이번 시험 전체를 대표하는 난이도(H/M/E). 여러 난이도 섞이면 M 같은 중간값으로 요약.
+
+{format_instructions}"""),
+        ("human", "다음 출제 요청을 분석하세요.\n\n{custom_request}"),
+    ])
+
+    try:
+        chain = plan_prompt | plan_llm | plan_parser
+        out = await chain.ainvoke({
+            "custom_request": custom_request,
+            "format_instructions": plan_parser.get_format_instructions(),
+        })
+        plan = QuizPlan(**out) if isinstance(out, dict) else out
+
+        # 1단계: 중복 버킷 제거 (예: "객관식 5문제 + 난이도 중2/어려움2/쉬움1"을
+        # LLM이 MC(None,5) + MC(H,2)+MC(M,2)+MC(E,1)처럼 이중으로 해석한 경우)
+        from collections import defaultdict
+
+        type_stats: Dict[str, Dict[str, int]] = defaultdict(lambda: {"with_diff": 0, "without_diff": 0})
+        for b in plan.breakdown:
+            t = (b.item_type_cd or "").upper().strip()
+            if not t:
+                continue
+            if b.item_diff_cd:
+                type_stats[t]["with_diff"] += b.count
+            else:
+                type_stats[t]["without_diff"] += b.count
+
+        # 특정 유형에서 "난이도 지정 합계"와 "난이도 미지정 합계"가 같으면,
+        # 난이도 미지정(None) 버킷은 중복으로 판단해 제거한다.
+        to_drop_types = {
+            t
+            for t, s in type_stats.items()
+            if s["with_diff"] > 0 and s["without_diff"] > 0 and s["with_diff"] == s["without_diff"]
+        }
+        if to_drop_types:
+            plan.breakdown = [
+                b
+                for b in plan.breakdown
+                if not (
+                    (b.item_type_cd or "").upper().strip() in to_drop_types
+                    and b.item_diff_cd is None
+                )
+            ]
+
+        # 2단계: breakdown 합계 보정 로직
+        total_from_breakdown = sum(b.count for b in plan.breakdown)
+
+        # breakdown이 비어 있거나 합계가 0이면 기본값(MC, 대표 난이도)으로 채운다.
+        if not plan.breakdown or total_from_breakdown == 0:
+            plan.breakdown = [
+                QuestionTypeCount(item_type_cd="MC", item_diff_cd=None, count=plan.requested_total)
+            ]
+            return plan
+
+        # 합계가 requested_total보다 큰 경우:
+        # - 동일 유형 내 item_diff_cd가 지정된 버킷이 이미 있고
+        #   item_diff_cd=None 버킷이 함께 있는 경우, 우선 None 버킷에서 개수를 줄여서
+        #   "명시된 난이도별 개수"를 우선 보존한다.
+        if total_from_breakdown > plan.requested_total:
+            excess = total_from_breakdown - plan.requested_total
+
+            # 1차: item_diff_cd가 None인 버킷에서 먼저 줄이기
+            for b in plan.breakdown:
+                if excess <= 0:
+                    break
+                if b.item_diff_cd is None and b.count > 0:
+                    dec = min(b.count, excess)
+                    b.count -= dec
+                    excess -= dec
+
+            # 2차: 여전히 남으면 뒤쪽 버킷부터 조금씩 줄이기(안전장치)
+            if excess > 0:
+                for b in reversed(plan.breakdown):
+                    if excess <= 0:
+                        break
+                    if b.count > 1:
+                        dec = min(b.count - 1, excess)
+                        b.count -= dec
+                        excess -= dec
+
+            # count가 0 이하인 버킷은 제거
+            plan.breakdown = [b for b in plan.breakdown if b.count > 0]
+            total_from_breakdown = sum(b.count for b in plan.breakdown)
+
+        # breakdown 합계가 0이 아니고 requested_total과 여전히 다르면,
+        # requested_total을 breakdown 합계로 맞춘다.
+        if total_from_breakdown > 0 and total_from_breakdown != plan.requested_total:
+            plan.requested_total = total_from_breakdown
+        return plan
+    except Exception as e:
+        print(f"Warning: extract_quiz_plan 실패 (custom_request 일부 사용): {e}")
+        return None
+
+
 def load_default_system_prompt() -> str:
     """기본 시스템 프롬프트를 YAML에서 로드"""
     prompt_data = load_yaml_file(DEFAULT_SYSTEM_PROMPT_PATH)
@@ -323,6 +522,31 @@ async def generate_exam(user_id: str, class_id: str, exam_config: dict):
             else:
                 print(f"Info: {class_id} 강의에서 '{custom_request}'와 관련된 문서를 찾을 수 없어 문서를 참고하지 않고 시험지를 생성합니다.")
 
+        custom_request = exam_config.get('custom_request', '없음')
+        # 에이전트 1단계: 요청에서 문항 수·유형·난이도 구조화 추출 → 2단계에서 '정확히 N문항' 지시
+        plan = await extract_quiz_plan(custom_request)
+        if plan:
+            quiz_plan_instruction = _format_quiz_plan_instruction(plan)
+            breakdown_summary = [
+                (
+                    b.item_type_cd,
+                    (b.item_diff_cd or "").upper().strip() if b.item_diff_cd else None,
+                    b.count,
+                )
+                for b in plan.breakdown
+            ]
+            print(
+                "Info: 출제 계획 추출됨 — "
+                f"총 {plan.requested_total}문항, "
+                f"유형·난이도별: {breakdown_summary}, "
+                f"전체 대표 난이도: {plan.difficulty}"
+            )
+        else:
+            quiz_plan_instruction = (
+                "문항 수·유형은 사용자 요청(아래 custom_request)에 명시된 대로 **정확히** 지키세요. "
+                "1문항이라도 많거나 적으면 안 됩니다."
+            )
+
         llm = ChatOpenAI(
             model="o1",
             api_key=OPENAI_API_KEY
@@ -345,11 +569,22 @@ async def generate_exam(user_id: str, class_id: str, exam_config: dict):
             question_profile_text = textwrap.dedent(question_profile).strip()
             system_template = f"{system_template}\n\n**이 과목의 출제 가이드라인:**\n{question_profile_text}"
 
-        human_template = "{subject_name} 과목 범위 내에서 퀴즈 문제를 만들어 주세요. "\
-            " 사용자의 요청사항에서 문제 유형과 개수를 파악하여 출제해주세요."\
-            " 문제에 대한 **해설도 함께 제공**해주세요. "\
-            " 한국어로 질문을 하면 반드시 대답도 **한국어로 제공**해주세요."\
-            " 문제지 출제 요청사항: {custom_request}"
+        # 문항 수 필수 준수 블록: 구조화된 계획으로 '정확히 N문항' 강제
+        system_template = (
+            f"{system_template}\n\n"
+            "**【문항 수 필수 준수】**\n"
+            "{quiz_plan_instruction}\n"
+            "위 개수·유형을 정확히 지키세요. 1문항이라도 많거나 적게 내면 안 됩니다."
+        )
+
+        human_template = (
+            "{subject_name} 과목 범위 내에서 퀴즈 문제를 만들어 주세요. "
+            "**반드시 아래 출제 계획에 따라 정확히 해당 문항 수만큼만** 출제해주세요. "
+            "문제에 대한 **해설도 함께 제공**해주세요. "
+            "한국어로 질문을 하면 반드시 대답도 **한국어로 제공**해주세요.\n\n"
+            "출제 계획:\n{quiz_plan_instruction}\n\n"
+            "사용자 요청 원문: {custom_request}"
+        )
 
         prompt = ChatPromptTemplate(
             messages=[
@@ -357,9 +592,6 @@ async def generate_exam(user_id: str, class_id: str, exam_config: dict):
                 HumanMessagePromptTemplate.from_template(human_template)
             ]
         )
-
-        # 추가 요청사항 처리
-        custom_request = exam_config.get('custom_request', '없음')
 
         chain = (
             prompt 
@@ -381,12 +613,99 @@ async def generate_exam(user_id: str, class_id: str, exam_config: dict):
             "context": context,
             "subject_name": exam_config['subject_name'],
             "custom_request": custom_request,
-            "format_instructions": format_instructions
+            "format_instructions": format_instructions,
+            "quiz_plan_instruction": quiz_plan_instruction,
         })
 
         # ExamOutput 객체로 변환
         if isinstance(exam, dict):
             exam = ExamOutput(**exam)
+
+        # 에이전트 2단계 이후 백엔드 가드레일:
+        # - 계획(plan)의 breakdown((유형, 난이도)별 문항 수)와 requested_total(총 문항 수)을 기준으로
+        # - item_type_cd(문항 유형)와 item_diff_cd(난이도)를 함께 고려하여 최종 문항을 선택한다.
+        #
+        # 정책:
+        # 1) plan.breakdown 에 정의된 (유형, 난이도) 조합별로 count 만큼 우선 선택한다.
+        # 2) 난이도가 지정된 경우, 먼저 해당 난이도만 뽑고 부족하면 같은 유형 내 다른 난이도로 채운다.
+        # 3) 난이도가 지정되지 않은 항목(item_diff_cd=None)은 해당 유형 내 어떤 난이도든 허용한다.
+        # 4) 원래 생성된 문제 순서를 최대한 보존한다.
+        if 'plan' in locals() and isinstance(plan, QuizPlan):
+            total_target = plan.requested_total
+            original_questions = exam.questions
+            selected_indices: set[int] = set()
+
+            for bucket in plan.breakdown:
+                target_type = (bucket.item_type_cd or "").upper().strip()
+                target_diff = (bucket.item_diff_cd or "").upper().strip() if bucket.item_diff_cd else ""
+                remaining = bucket.count
+
+                if remaining <= 0 or not target_type:
+                    continue
+
+                # 1차 패스: 유형 + (필요 시) 난이도 완전 일치
+                for idx, q in enumerate(original_questions):
+                    if remaining <= 0:
+                        break
+                    if idx in selected_indices:
+                        continue
+
+                    q_type = (getattr(q, "item_type_cd", "") or "").upper().strip()
+                    q_diff = (getattr(q, "item_diff_cd", "") or "").upper().strip()
+
+                    if q_type != target_type:
+                        continue
+                    if target_diff and q_diff != target_diff:
+                        continue
+
+                    selected_indices.add(idx)
+                    remaining -= 1
+
+                # 2차 패스: 난이도 지정된 버킷인데 아직 모자라면, 같은 유형 내 다른 난이도로 채움
+                if target_diff and remaining > 0:
+                    for idx, q in enumerate(original_questions):
+                        if remaining <= 0:
+                            break
+                        if idx in selected_indices:
+                            continue
+
+                        q_type = (getattr(q, "item_type_cd", "") or "").upper().strip()
+                        if q_type != target_type:
+                            continue
+
+                        selected_indices.add(idx)
+                        remaining -= 1
+
+            # 최종 선택된 문항 리스트 구성 (원래 순서 유지)
+            selected_questions = [original_questions[i] for i in sorted(selected_indices)]
+
+            # 혹시라도 breakdown 합계를 초과하는 경우 총 개수 기준으로 한 번 더 슬라이스
+            if len(selected_questions) > total_target:
+                print(
+                    f"Info: 가드레일 선택 후 문항 수 초과 — 요청 {total_target}문항, 선택 {len(selected_questions)}문항. "
+                    f"앞에서부터 {total_target}문항만 사용합니다."
+                )
+                selected_questions = selected_questions[:total_target]
+
+            # 로그용: (유형, 난이도)별 실제 선택 결과 집계
+            actual_by_bucket: Dict[tuple, int] = {}
+            for q in selected_questions:
+                q_type = (getattr(q, "item_type_cd", "") or "").upper().strip()
+                q_diff = (getattr(q, "item_diff_cd", "") or "").upper().strip()
+                key = (q_type, q_diff)
+                actual_by_bucket[key] = actual_by_bucket.get(key, 0) + 1
+
+            target_summary = [
+                (b.item_type_cd, (b.item_diff_cd or "").upper().strip() if b.item_diff_cd else None, b.count)
+                for b in plan.breakdown
+            ]
+
+            print(
+                f"Info: 가드레일 적용 결과 — 요청 총 {total_target}문항, "
+                f"유형·난이도별 목표 {target_summary}, 실제 선택 {actual_by_bucket}"
+            )
+
+            exam.questions = selected_questions
 
         return {"exam_data": exam}
     except Exception as e:
@@ -487,13 +806,13 @@ if __name__ == "__main__":
         #user_id="43819",  # 재료과학개론II 박종민 43819
         #user_id="35033",  #--'무역결제론' 35033 성시일
         #user_id="45932",
-        #user_id="20999", #김은주교수
-        user_id="12345",
+        user_id="20999", #김은주교수
+        #user_id="12345",
         #cls_id="2024-20-903102-2-01",  # 강의 아이디 창의적코딩 
         #cls_id="2025-20-633004-1-01",  # 무역결제론 
         #cls_id="2025-20-513003-1-01",  # 재료과학개론II 
-        #cls_id="2025-20-003039-2-06", #김은주교수 창의코딩-모두의웹
-        cls_id="12345",
+        cls_id="2025-20-003039-2-06", #김은주교수 창의코딩-모두의웹
+        #cls_id="12345",
         session_id="123b4567-3807-4afe-bb5d-df78f7e07ef0",  # 세션 아이디
         chat_seq=0,  # 채팅 시퀀스 번호
         exam_config={
@@ -505,7 +824,7 @@ if __name__ == "__main__":
             #'course_id': "903102",  # 강의 ID 창의적코딩
             'course_id': "003039", #김은주교수 창의코딩-모두의웹
 
-            'custom_request': "문제 유형은 객관식이고 문제 개수는 5개이며 난이도는 중급인 문제를 생성하시오."
+            'custom_request': "객관식 상20, 하10, ox 30 문제 만들어줘"
         }
     ))
     
