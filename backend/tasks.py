@@ -26,6 +26,7 @@ from embedding_m import process_new_files_and_update_summaries
 from embedding_n import process_and_embed_new_files
 
 from get_lms_file_dwld_notice import download_multiple_files_n
+from utils.milvus_util import construct_milvus_payload, send_milvus_ingest
 
 DEFAULT_BASE_PATH = "/data/storage/hlta_download_files"
 
@@ -67,8 +68,8 @@ except Exception as e:
     redis_client = None
 
 celery_app.conf.task_routes = {
-    'task.transcribe_single_video': {'queue': 'stt_queue'},
-    'task.process_embedding_v': {'queue': 'embedding_queue'}
+    'tasks.transcribe_single_video': {'queue': 'stt_queue'},
+    'tasks.process_embedding_v': {'queue': 'embedding_queue'}
 }
 
 celery_app.conf.update(
@@ -101,6 +102,31 @@ async def get_db_pool():
 
 def get_session_redis_key(user_id):
     return f"session:smartlead:{user_id}"
+
+async def sync_milvus_file(pool, file_id):
+    """Helper to sync a single file to Milvus and update DB status"""
+    try:
+        async with pool.acquire() as connection:
+            query = """
+                SELECT 
+                    f.file_id, f.cls_id, f.file_type_cd, f.file_nm, f.file_ext, 
+                    f.file_path, f.stt_file_path, f.file_size, f.week_num, c.user_id
+                FROM cls_file_mst f
+                JOIN cls_mst c ON f.cls_id = c.cls_id
+                WHERE f.file_id = $1
+            """
+            row = await connection.fetchrow(query, file_id)
+            if row:
+                payload = construct_milvus_payload(dict(row))
+                success, response_text = send_milvus_ingest(payload)
+                status = 'Y' if success else 'E'
+                print(f" -> Milvus Sync Result for {file_id}: {status} ({response_text})")
+                await connection.execute(
+                    "UPDATE cls_file_mst SET milvus_yn = $1, milvus_upd_dt = NOW() WHERE file_id = $2", 
+                    status, file_id
+                )
+    except Exception as e:
+        print(f"Error in sync_milvus_file for {file_id}: {e}")
 
 async def get_file_path_from_db(pool, file_id, cls_id):  ##### 파일 경로에 대해서 엘렉시와 조율 필요 emjay
     """
@@ -367,6 +393,12 @@ def process_embedding_v(self, cls_id, user_id, file_id):
     except Exception as e:
         print(f"[Embedding Task][Queue: embedding_queue] 임베딩 처리 오류: {file_id}, error: {e}")
  
+    # --- Real-time Milvus Sync Trigger ---
+    async def trigger_sync():
+        pool = await get_db_pool()
+        await sync_milvus_file(pool, file_id)
+        await pool.close()
+    run_coroutine(trigger_sync())
 
 
 @celery_app.task

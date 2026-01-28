@@ -17,86 +17,11 @@ sys.path.append(str(backend_dir))
 # Suppress InsecureRequestWarning for self-signed certificates (verify=False)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+from utils.milvus_util import construct_milvus_payload, send_milvus_ingest
 from config import DATABASE_CONFIG
 
-# Configuration from Environment Variables (set via docker-compose env_file)
-MILVUS_INGEST_URL = os.getenv("MILVUS_INGEST_URL")
-if not MILVUS_INGEST_URL:
-    raise ValueError("MILVUS_INGEST_URL environment variable is not set. Check docker-compose.yml env_file")
-TENANT_ID = os.getenv("MILVUS_TENANT_ID")
-if not TENANT_ID:
-    raise ValueError("MILVUS_TENANT_ID environment variable is not set in .env file")
-
-CALLBACK_URL_BASE = os.getenv("MILVUS_CALLBACK_URL")
-if not CALLBACK_URL_BASE:
-    raise ValueError("MILVUS_CALLBACK_URL environment variable is not set in .env file")
-
-X_API_KEY = os.getenv("MILVUS_API_KEY")
-if not X_API_KEY:
-    raise ValueError("MILVUS_API_KEY environment variable is not set in .env file")
-
-def construct_payload(file_record: dict):
-    """Constructs the JSON payload for the Milvus Ingest API"""
-    file_id = file_record['file_id']
-    cls_id = file_record['cls_id']
-    user_id = file_record['user_id']
-    file_nm = file_record['file_nm']
-    file_ext = file_record['file_ext']
-    file_path = file_record['file_path']
-    file_size = file_record['file_size']
-    week_num = file_record['week_num'] or 1
-    file_type_cd = file_record['file_type_cd']
-    
-    # Final user_id (Student/Faculty ID as requested)
-    final_user_id = user_id
-    
-    # Mapping content type: M (Material) -> lecture_material, Others -> bulletin_board
-    content_type = "lecture_material" if file_type_cd == 'M' else "bulletin_board"
-    
-    # Fixed S3 prefix as requested by admin
-    #S3_FIXED_PREFIX = "s3://c11ebc288e44a7952a69876b2c834ff44ac7b00f"
-    S3_FIXED_PREFIX = "aiant"
-    full_file_name = f"{file_nm}.{file_ext}" if not file_nm.endswith(file_ext) else file_nm
-    storage_url = f"{S3_FIXED_PREFIX}"
-    
-    # Payload structured according to the JobManager requirement
-    return {
-        "command": "ingest",
-        "tenant_id": TENANT_ID,
-	"user_id": final_user_id,
-	"cls_id": cls_id,
-	"file_id": file_id,
-        "storage_url": storage_url,
-        "metadata": {
-        	"files": [
-                    {
-                        "filename": full_file_name,
-                        "saved_pathname": file_path,
-                        "size": file_size
-                    }
-                ],
-                "week": week_num,
-                "title": full_file_name,
-                "content_type": content_type,
-                "embedding_date": datetime.now().strftime("%Y-%m-%d")
-            },
-        "config": {
-                "chunk_size": 250,
-                "chunk_overlap": 50
-            },
-        "callback": {
-            "url": CALLBACK_URL_BASE,
-            "id": file_id
-        }
-    }
-
 def ingest_to_milvus(payload: dict, file_id: str, dry_run: bool = False):
-    """Sends a single file record to the Milvus Ingest API (Synchronous using requests)"""
-    
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-key": X_API_KEY
-    }
+    """Sends a single file record to the Milvus Ingest API"""
     
     if dry_run:
         print(f"[{datetime.now()}] [DRY-RUN] Payload for {file_id}:")
@@ -104,15 +29,14 @@ def ingest_to_milvus(payload: dict, file_id: str, dry_run: bool = False):
         return True
         
     try:
-        print(f"[{datetime.now()}] Sending {file_id} to Milvus ({MILVUS_INGEST_URL})...")
-        # verify=False is used because JobManager uses a self-signed certificate
-        resp = requests.post(MILVUS_INGEST_URL, headers=headers, json=payload, timeout=30.0, verify=False)
+        print(f"[{datetime.now()}] Sending {file_id} to Milvus...")
+        success, response_text = send_milvus_ingest(payload)
         
-        if resp.status_code in [200, 201]:
-            print(f" -> Success: {resp.text}")
+        if success:
+            print(f" -> Success: {response_text}")
             return True
         else:
-            print(f" -> Failed: Status {resp.status_code}, {resp.text}")
+            print(f" -> Failed: {response_text}")
             return False
     except Exception as e:
         print(f" -> Error calling Milvus API: {e}")
@@ -122,6 +46,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Daily Milvus Ingestion Sync Script")
     parser.add_argument("--dry-run", action="store_true", help="Print payload without calling API or updating DB")
     parser.add_argument("--file_id", type=str, help="Process only a specific file_id")
+    parser.add_argument("--all", action="store_true", help="Include files already synced to Milvus (milvus_yn='Y')")
     args = parser.parse_args()
 
     print(f"[{datetime.now()}] Starting Daily Milvus Sync Batch (Dry-run: {args.dry_run})")
@@ -130,21 +55,28 @@ async def main():
         conn = await asyncpg.connect(**DATABASE_CONFIG)
         
         # Base query to find files to sync
+        # Logic: Documents (M, N) -> FU03 (Upload/Download Comp)
+        #        Videos (V) -> FS03 (STT Comp), EP03 (Embed Comp), SM03 (Summary Comp)
         query = """
             SELECT 
                 f.file_id, f.cls_id, f.file_type_cd, f.file_nm, f.file_ext, 
-                f.file_path, f.file_size, f.week_num, c.user_id
+                f.file_path, f.stt_file_path, f.file_size, f.week_num, c.user_id
             FROM cls_file_mst f
             JOIN cls_mst c ON f.cls_id = c.cls_id
             WHERE c.rag_yn IN ('N', 'Y')
-            AND f.upload_status = 'FU03'
+            AND (
+                (f.file_type_cd IN ('M', 'N') AND f.upload_status = 'FU03')
+                OR (f.file_type_cd = 'V' AND f.upload_status IN ('FS03', 'EP03', 'SM03'))
+            )
         """
         
         if args.file_id:
             query += " AND f.file_id = $1"
             rows = await conn.fetch(query, args.file_id)
         else:
-            query += " AND (f.milvus_yn IS NULL OR f.milvus_yn != 'Y') ORDER BY f.dwld_comp_dt DESC"
+            if not args.all:
+                query += " AND (f.milvus_yn IS NULL OR f.milvus_yn != 'Y')"
+            query += " ORDER BY f.dwld_comp_dt DESC"
             rows = await conn.fetch(query)
             
         print(f"Found {len(rows)} files to process.")
@@ -155,7 +87,15 @@ async def main():
 
         for row in rows:
             file_id = row['file_id']
-            payload = construct_payload(dict(row))
+            file_type_cd = row['file_type_cd']
+            stt_path = row['stt_file_path']
+            
+            # STRICT SAFETY CHECK: Never sync mp4 files. Must have stt_file_path for Videos.
+            if file_type_cd == 'V' and (not stt_path or not stt_path.lower().endswith('.txt')):
+                print(f"[{datetime.now()}] [Skipped] {file_id} is a video but has no valid STT transcript path.")
+                continue
+
+            payload = construct_milvus_payload(dict(row))
             success = ingest_to_milvus(payload, file_id, args.dry_run)
             
             if not args.dry_run:

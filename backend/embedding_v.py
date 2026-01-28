@@ -26,6 +26,7 @@ from datetime import datetime
 import json  # JSON 처리를 위해 추가
 from langchain.prompts import PromptTemplate
 import redis
+from utils.milvus_util import construct_milvus_payload, send_milvus_ingest
 
 nltk.download('punkt')
 load_dotenv()
@@ -589,9 +590,36 @@ async def process_and_embed_files(cls_id: str, files_info: list, user_id: str):
                 print(f"{file_id} 파일 임베딩 및 요약 생성 성공!")
             else:
                 # 주차 정보가 없는 경우에는 요약 작성 없이 DB 업데이트
-                await update_status_in_db("EP03", 'EMB_COMP_DT', file_id, cls_id=cls_id, user_id=user_id)
                 update_hash_and_notify_task(redis_hash_key, stream_key, "embedding", file_id, {"embedding_status": "completed"})
                 print(f"{file_id} 파일 임베딩 성공! (주차 정보 없음)")
+
+            # --- Real-time Milvus Sync Trigger ---
+            try:
+                print(f"[{file_id}] Real-time Milvus Sync Trigger...")
+                conn = await asyncpg.connect(**DATABASE_CONFIG)
+                try:
+                    query = """
+                        SELECT 
+                            f.file_id, f.cls_id, f.file_type_cd, f.file_nm, f.file_ext, 
+                            f.file_path, f.stt_file_path, f.file_size, f.week_num, c.user_id
+                        FROM cls_file_mst f
+                        JOIN cls_mst c ON f.cls_id = c.cls_id
+                        WHERE f.file_id = $1
+                    """
+                    row = await conn.fetchrow(query, file_id)
+                    if row:
+                        payload = construct_milvus_payload(dict(row))
+                        success, response_text = send_milvus_ingest(payload)
+                        status = 'Y' if success else 'E'
+                        await conn.execute(
+                            "UPDATE cls_file_mst SET milvus_yn = $1, milvus_upd_dt = NOW() WHERE file_id = $2", 
+                            status, file_id
+                        )
+                        print(f" -> Milvus Sync Result: {status}")
+                finally:
+                    await conn.close()
+            except Exception as sync_e:
+                print(f"Milvus Sync Trigger Error for {file_id}: {sync_e}")
             
             redis_client.hdel(redis_hash_key, file_id)
 

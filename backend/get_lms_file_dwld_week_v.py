@@ -21,7 +21,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # 설정
 #DEFAULT_BASE_PATH = "./download_files"
 #DEFAULT_LOCAL_MODEL_PATH = "./stt/whisper_models"
-DEFAULT_BASE_PATH = "/app/tutor/download_files"
+DEFAULT_BASE_PATH = "/data/storage/hlta_download_files"
 DEFAULT_LOCAL_MODEL_PATH = "/app/tutor/stt/whisper_models"
 
 

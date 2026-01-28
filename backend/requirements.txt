@@ -55,3 +55,5 @@ requests
 scipy==1.15.1
 typing
 uvicorn[standard]==0.34.0
+pymilvus
+google-genai

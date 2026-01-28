@@ -322,6 +322,7 @@ async def process_and_embed_files(cls_id: str, files_info: list, user_id: str):
                 raise
             
             # 임베딩 성공 처리
+            # 임베딩 성공 처리
             await update_status_in_db("EP03", 'EMB_COMP_DT', file_id)
             update_hash_and_notify_task(stream_key, "embedding", file_id, {"embedding_status": "completed"})
             print(f"{file_id} 파일 임베딩 성공!")

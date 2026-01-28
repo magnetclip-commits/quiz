@@ -12,7 +12,7 @@ from config import DATABASE_CONFIG
 
 # 설정
 #DEFAULT_BASE_PATH = "./download_files"
-DEFAULT_BASE_PATH = "/app/tutor/download_files"
+DEFAULT_BASE_PATH = "/data/storage/hlta_download_files"
 
 redis_client = redis.Redis(**REDIS_CONFIG)
 

@@ -27,8 +27,8 @@ class VectorDB:
         Milvus 연결, Collection schema 및 index들을 불러온 후 적용, Collection 불러오기(load)
         """
         connections.connect("default",
-                            host=os.getenv("MILVUS_HOST", "kaai-milvus-standalone"),
-                            port=os.getenv("MILVUS_PORT", "19530")
+                            host=os.getenv("MILVUS_HOST"),
+                            port=os.getenv("MILVUS_PORT")
         )
         self.vdb_cfg = VectorDBConfig()
 
